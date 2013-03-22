@@ -1,0 +1,11 @@
+*~
+TAGS
+dist*/
+state/
+.hsenv*/
+.virthualenv/
+*.orig
+*.sw?
+acid-state/
+log/
+snaplets/

@@ -1,0 +1,35 @@
+name:                   colog
+version:                0
+synopsis:               A log aggregator
+description:            A log aggregator
+copyright:              Erudify A.G.
+license:                AllRightsReserved
+license-file:           LICENSE
+author:                 Thomas Schilling
+maintainer:             thomas.schilling@erudify.ch
+category:               System
+build-type:             Simple
+cabal-version:          >=1.8
+
+executable colog
+  build-depends:
+        base                    >= 4,
+        aws                     == 0.7.*,
+        cmdtheline              == 0.2.*,
+        containers             == 0.5.*,
+        http-conduit            == 1.9.*,
+        conduit                 == 1.0.*,
+        transformers            == 0.3.*,
+        bytestring              == 0.10.*,
+        io-streams              == 1.0.*,
+        parallel-io             == 0.3.*,
+        text
+
+  hs-source-dirs:	src
+  main-is:		Main.hs
+
+  other-modules:
+        DateMatch
+
+  ghc-options:		-Wall
+  ghc-prof-options:	-auto-all
