@@ -3,12 +3,13 @@ version:                0
 synopsis:               A log aggregator
 description:            A log aggregator
 copyright:              Erudify A.G.
-license:                AllRightsReserved
+license:                BSD3
 license-file:           LICENSE
 author:                 Thomas Schilling
-maintainer:             thomas.schilling@erudify.ch
+maintainer:             nominolo@googlemail.com
 category:               System
 build-type:             Simple
+homepage:               https://github.com/erudify/colog
 cabal-version:          >=1.8
 
 executable colog
@@ -28,8 +29,7 @@ executable colog
   hs-source-dirs:	src
   main-is:		Main.hs
 
-  other-modules:
-        DateMatch
+  other-modules:        DateMatch
 
   ghc-options:		-Wall
   ghc-prof-options:	-auto-all
