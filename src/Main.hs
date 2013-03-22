@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, BangPatterns, PatternGuards #-}
+{-# LANGUAGE OverloadedStrings, BangPatterns, PatternGuards, ScopedTypeVariables #-}
 
 module Main where
 
@@ -6,18 +6,20 @@ import qualified Aws
 import qualified Aws.S3 as S3
 
 import           Control.Applicative
+import           Control.Concurrent ( threadDelay )
 import           Control.Concurrent.MVar
 import           Control.Concurrent.ParallelIO.Local ( withPool, parallel )
 import           Control.Monad ( when )
 import           Control.Monad.IO.Class
+import           Control.Exception ( catch, throwIO )
 import qualified Data.ByteString.Char8 as B
-import           Data.Conduit ( runResourceT )
+import           Data.Conduit ( runResourceT, ResourceT )
 import           Data.Maybe ( fromMaybe )
 import           Data.Monoid
 import qualified Data.Set as Set
 import qualified Data.Map as Map
 import qualified Data.Text as T
-import           Network.HTTP.Conduit ( withManager, Manager )
+import           Network.HTTP.Conduit ( withManager, Manager, HttpException(..) )
 import           System.Environment
 import           System.Exit ( exitFailure )
 import           System.IO.Streams ( InputStream, Generator, yield )
@@ -40,7 +42,7 @@ msg Config{ cfgLoggerLock = lock } text =
   withMVar lock (\_ -> putStrLn text)
 
 defaultMaxKeys :: Maybe Int
-defaultMaxKeys = Just 130 -- Nothing
+defaultMaxKeys = Just 1000 -- Nothing -- Just 130 -- Nothing
 
 main :: IO ()
 main = do
@@ -82,7 +84,7 @@ main = do
     all_servers <- Streams.toList =<< lsS3 cfg (T.pack rootPath)
     let !servers = {- take 10 -} all_servers
 
-    objects <- withPool 20 $ \pool -> parallel pool $
+    objects <- withPool 4 $ \pool -> parallel pool $
                  [ Streams.toList =<< lsObjects cfg serverPath range
                  | serverPath <- servers
                  ]
@@ -104,10 +106,10 @@ lsObjects :: Config
           -> S3Path -- ^ Absolute path of server's log directory
           -> Range  -- ^ Range requested
           -> IO (InputStream S3ObjectKey)
-lsObjects cfg serverPath range@(Range _ toRange) = do
-  keys <- Streams.fromGenerator (chunkedGen (matching_ cfg serverPath range))
+lsObjects cfg serverPath range@(Range startDate endDate) = do
+  keys <- Streams.fromGenerator (chunkedGen (matching_ cfg serverPath startDate))
   let !srvLen = T.length serverPath
-  let inRange path = isBefore toRange (Date (T.drop srvLen path))
+  let inRange path = isBefore endDate (Date (T.drop srvLen path))
   takeWhileStream inRange keys
 
 --- Internals ----------------------------------------------------------
@@ -116,6 +118,20 @@ data Response a
   = Done
   | Full !a
   | More !a (IO (Response a))
+
+runRequest :: ResourceT IO a -> IO a
+runRequest act0 = withRetries 3 300 act0
+ where
+   withRetries !n !delayInMS act =
+     runResourceT act `catch` (\(e :: HttpException) -> do
+                    if n > 0 then do
+                       putStrLn $ "HTTP-Error: " ++ show e ++ "\nRetrying in "
+                                  ++ show delayInMS ++ "ms..."
+                       threadDelay (delayInMS * 1000)
+                       withRetries (n - 1) (delayInMS + delayInMS) act
+                      else do
+                        putStrLn $ "HTTP-Error: " ++ show e ++ "\nFATAL: Giving up"
+                        throwIO e)
 
 takeWhileStream :: (a -> Bool) -> InputStream a -> IO (InputStream a)
 takeWhileStream predicate input = Streams.fromGenerator go
@@ -129,7 +145,7 @@ lsS3_ :: Config -> S3Path -> IO (Response [S3Path])
 lsS3_ cfg0@(Config cfg s3cfg _ mgr bucket) path = go Nothing
  where
    go marker = do
-      runResourceT $ do
+      runRequest $ do
         liftIO $ msg cfg0 ("REQ: " ++ show path ++
                            maybe "" ((" FROM: "++) . show) marker)
         rsp <- Aws.pureAws cfg s3cfg mgr $!
@@ -150,12 +166,12 @@ lsS3_ cfg0@(Config cfg s3cfg _ mgr bucket) path = go Nothing
              let !marker' = last entries
              return $! More entries (go $! Just marker')
 
-matching_ :: Config -> S3Path -> Range -> IO (Response [S3ObjectKey])
-matching_ cfg@(Config awsCfg s3Cfg _ mgr bucket) serverPath (Range fromDate _toDate) =
+matching_ :: Config -> S3Path -> DatePattern -> IO (Response [S3ObjectKey])
+matching_ cfg@(Config awsCfg s3Cfg _ mgr bucket) serverPath fromDate =
   go (Just (serverPath <> toMarker fromDate))
  where
    go marker = do
-     runResourceT $ do
+     runRequest $ do
        liftIO $ msg cfg ("REQ: " ++ show serverPath ++
                           maybe "" ((" FROM: "++) . show) marker)
        rsp <- Aws.pureAws awsCfg s3Cfg mgr $!
