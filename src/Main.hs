@@ -5,6 +5,7 @@ module Main where
 import qualified Aws
 import qualified Aws.S3 as S3
 
+import qualified Data.Attoparsec.Text as Atto
 import           Control.Applicative
 import           Control.Concurrent ( threadDelay )
 import           Control.Concurrent.Async
@@ -51,12 +52,36 @@ msg Config{ cfgLoggerLock = lock } text =
 defaultMaxKeys :: Maybe Int
 defaultMaxKeys = Just 1000
 
+printUsage :: IO ()
+printUsage = do
+    hPutStrLn stderr $
+      "USAGE: colog s3://BUCKETNAME/LOGROOT/ FROMDATE[/TODATE]"
+
+bucketParser :: Atto.Parser (T.Text, T.Text)
+bucketParser = do
+  Atto.string "s3://"
+  bucketName <- Atto.takeWhile (/= '/')
+  Atto.char '/'
+  rootPath <- Atto.takeText
+  return (bucketName, rootPath)
+
+
 main :: IO ()
 main = do
   access_key <- fromMaybe "" <$> lookupEnv "AWS_ACCESS_KEY"
   secret_key <- fromMaybe "" <$> lookupEnv "AWS_SECRET_KEY"
 
-  bucketName : rootPath : {- testServer : -} _ <- getArgs
+  args <- getArgs
+  when (length args < 3) $ do
+
+  bucketNameAndrootPath : otherArgs <- getArgs
+
+  (bucketName, rootPath)
+     <- case (Atto.parseOnly bucketParser (T.pack bucketNameAndrootPath)) of
+          Right (b, r) -> return (b, r)
+          Left msg -> do
+            printUsage
+            error "Failed to parse bucket"
 
   when (any null [access_key, secret_key]) $ do
     putStrLn $ "ERROR: Access key or secret key missing\n" ++
@@ -83,15 +108,24 @@ main = do
                      , cfgS3Cfg = s3cfg
                      , cfgLoggerLock = loggerLock
                      , cfgManager = mgr
-                     , cfgBucketName = T.pack bucketName
+                     , cfgBucketName = bucketName
                      , cfgReadFileThrottle = throttle
                      }
 
-    let Just fromDate = parseDatePattern "2013-03-10T10:10"
-        Just toDate   = parseDatePattern "2013-03-10T10:14"
+    let (fromDateText, toDateText)
+          | [] <- otherArgs
+          = ("2013-03-10T10:10", "2013-03-10T10:14")
+          | datePattern : _ <- otherArgs
+          = case T.splitOn "/" (T.pack datePattern) of
+              [start] -> (start, "")
+              start:end:_ -> (start, end)
+              _ -> error "splitOn returned empty list"
+
+    let Just fromDate = parseDatePattern fromDateText
+        Just toDate   = parseDatePattern toDateText
         range = Range fromDate toDate
 
-    all_servers <- Streams.toList =<< lsS3 cfg (T.pack rootPath)
+    all_servers <- Streams.toList =<< lsS3 cfg rootPath
     let !servers = {- take 10 -} all_servers
 
     queues <- forM servers $ \server -> do

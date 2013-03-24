@@ -17,6 +17,7 @@ executable colog
         base                    >= 4,
         aws                     == 0.7.*,
         async                   == 2.0.*,
+        attoparsec              == 0.10.*,
         cmdtheline              == 0.2.*,
         containers              == 0.5.*,
         http-conduit            == 1.9.*,
