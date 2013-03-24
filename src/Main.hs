@@ -7,14 +7,18 @@ import qualified Aws.S3 as S3
 
 import           Control.Applicative
 import           Control.Concurrent ( threadDelay )
+import           Control.Concurrent.Async
 import           Control.Concurrent.MVar
+import qualified Control.Concurrent.MSem as Sem
 import           Control.Concurrent.ParallelIO.Local ( withPool, parallel )
-import           Control.Monad ( when )
+import           Control.Concurrent.STM
+import           Control.Concurrent.STM.TBQueue
+import           Control.Monad ( when, forM, forM_, unless )
 import           Control.Monad.IO.Class
 import           Control.Exception ( catch, throwIO )
 import qualified Data.ByteString.Char8 as B
 import           Data.Conduit ( runResourceT, ResourceT )
-import           Data.Maybe ( fromMaybe )
+import           Data.Maybe ( fromMaybe, catMaybes )
 import           Data.Monoid
 import qualified Data.Set as Set
 import qualified Data.Map as Map
@@ -33,6 +37,7 @@ data Config = Config
   , cfgLoggerLock :: !(MVar ())
   , cfgManager    :: !Manager
   , cfgBucketName :: !T.Text
+  , cfgReadFileThrottle :: !(Sem.MSem Int)
   }
 
 data Range = Range !DatePattern !DatePattern
@@ -42,7 +47,7 @@ msg Config{ cfgLoggerLock = lock } text =
   withMVar lock (\_ -> putStrLn text)
 
 defaultMaxKeys :: Maybe Int
-defaultMaxKeys = Just 1000 -- Nothing -- Just 130 -- Nothing
+defaultMaxKeys = Just 1000
 
 main :: IO ()
 main = do
@@ -70,11 +75,14 @@ main = do
 
   withManager $ \mgr -> liftIO $ do
 
+    throttle <- Sem.new 4
+
     let cfg = Config { cfgAwsCfg = awsCfg
                      , cfgS3Cfg = s3cfg
                      , cfgLoggerLock = loggerLock
                      , cfgManager = mgr
                      , cfgBucketName = T.pack bucketName
+                     , cfgReadFileThrottle = throttle
                      }
 
     let Just fromDate = parseDatePattern "2013-03-10T10:10"
@@ -84,13 +92,53 @@ main = do
     all_servers <- Streams.toList =<< lsS3 cfg (T.pack rootPath)
     let !servers = {- take 10 -} all_servers
 
-    objects <- withPool 4 $ \pool -> parallel pool $
-                 [ Streams.toList =<< lsObjects cfg serverPath range
-                 | serverPath <- servers
-                 ]
+    queues <- forM servers $ \server -> do
+                q <- newTBQueueIO 1
+                worker <- async (processServer cfg server range q)
+                return (server, q, worker)
 
-    mapM_ print objects
-    print (length (filter (not . null) objects))
+    grabAndDistributeFiles queues
+
+    -- objects <- withPool 4 $ \pool -> parallel pool $
+    --              [ Streams.toList =<< lsObjects cfg serverPath range
+    --              | serverPath <- servers
+    --              ]
+
+    -- mapM_ print objects
+    -- print (length (filter (not . null) objects))
+
+grabAndDistributeFiles :: [(S3Path, TBQueue (Maybe S3ObjectKey), Async ())]
+                       -> IO ()
+grabAndDistributeFiles [] = return ()
+grabAndDistributeFiles queues = do
+  nextAvailMinutes <- forM queues $ \queue@(_, q, _) -> do
+                        mb_minute <- atomically (peekTBQueue q)
+                        case mb_minute of
+                          Nothing -> return Nothing
+                          Just minute ->
+                            return (Just (minute, queue))
+  let queues' = catMaybes nextAvailMinutes
+
+  unless (null queues') $ do
+    let !nextMinute = minimum (map fst queues')
+    print (nextMinute, [ server | (_, (server, _, _)) <- queues' ])
+    queues'' <- forM queues' $ \(minute, queue@(_, q, _)) -> do
+                  when (minute == nextMinute) $ do
+                    _ <- atomically (readTBQueue q)
+                    return ()
+                  return queue
+    grabAndDistributeFiles queues''
+
+processServer :: Config -> S3Path -> Range -> TBQueue (Maybe S3ObjectKey)
+              -> IO ()
+processServer cfg serverPath range queue = do
+  let !srvLen = T.length serverPath
+  keys <- lsObjects cfg serverPath range
+  let writeOne key = do
+          let !file = T.drop srvLen key
+          atomically (writeTBQueue queue (Just file))
+  Streams.skipToEof =<< Streams.mapM_ writeOne keys
+  atomically (writeTBQueue queue Nothing)
 
 type S3Path = T.Text
 type S3ObjectKey = T.Text
@@ -106,7 +154,7 @@ lsObjects :: Config
           -> S3Path -- ^ Absolute path of server's log directory
           -> Range  -- ^ Range requested
           -> IO (InputStream S3ObjectKey)
-lsObjects cfg serverPath range@(Range startDate endDate) = do
+lsObjects cfg serverPath (Range startDate endDate) = do
   keys <- Streams.fromGenerator (chunkedGen (matching_ cfg serverPath startDate))
   let !srvLen = T.length serverPath
   let inRange path = isBefore endDate (Date (T.drop srvLen path))
@@ -122,6 +170,7 @@ data Response a
 runRequest :: ResourceT IO a -> IO a
 runRequest act0 = withRetries 3 300 act0
  where
+   withRetries :: Int -> Int -> ResourceT IO a -> IO a
    withRetries !n !delayInMS act =
      runResourceT act `catch` (\(e :: HttpException) -> do
                     if n > 0 then do
@@ -142,7 +191,7 @@ takeWhileStream predicate input = Streams.fromGenerator go
              Just a -> if predicate a then yield a >> go else return ()
 
 lsS3_ :: Config -> S3Path -> IO (Response [S3Path])
-lsS3_ cfg0@(Config cfg s3cfg _ mgr bucket) path = go Nothing
+lsS3_ cfg0@(Config cfg s3cfg _ mgr bucket _throttle) path = go Nothing
  where
    go marker = do
       runRequest $ do
@@ -167,10 +216,10 @@ lsS3_ cfg0@(Config cfg s3cfg _ mgr bucket) path = go Nothing
              return $! More entries (go $! Just marker')
 
 matching_ :: Config -> S3Path -> DatePattern -> IO (Response [S3ObjectKey])
-matching_ cfg@(Config awsCfg s3Cfg _ mgr bucket) serverPath fromDate =
+matching_ cfg@(Config awsCfg s3Cfg _ mgr bucket throttle) serverPath fromDate =
   go (Just (serverPath <> toMarker fromDate))
  where
-   go marker = do
+   go marker = Sem.with throttle $ do
      runRequest $ do
        liftIO $ msg cfg ("REQ: " ++ show serverPath ++
                           maybe "" ((" FROM: "++) . show) marker)

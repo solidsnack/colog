@@ -16,14 +16,17 @@ executable colog
   build-depends:
         base                    >= 4,
         aws                     == 0.7.*,
+        async                   == 2.0.*,
         cmdtheline              == 0.2.*,
-        containers             == 0.5.*,
+        containers              == 0.5.*,
         http-conduit            == 1.9.*,
         conduit                 == 1.0.*,
         transformers            == 0.3.*,
         bytestring              == 0.10.*,
         io-streams              == 1.0.*,
         parallel-io             == 0.3.*,
+        stm                     == 2.4.*,
+        SafeSemaphore           == 0.9.*,
         text
 
   hs-source-dirs:	src
