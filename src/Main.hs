@@ -23,7 +23,8 @@ import           Data.Monoid
 import qualified Data.Set as Set
 import qualified Data.Map as Map
 import qualified Data.Text as T
-import           Network.HTTP.Conduit ( withManager, Manager, HttpException(..) )
+import           Network.HTTP.Conduit ( withManager, Manager,
+                                        HttpException(..) )
 import           System.Environment
 import           System.Exit ( exitFailure )
 import           System.IO.Streams ( InputStream, Generator, yield )
@@ -155,7 +156,8 @@ lsObjects :: Config
           -> Range  -- ^ Range requested
           -> IO (InputStream S3ObjectKey)
 lsObjects cfg serverPath (Range startDate endDate) = do
-  keys <- Streams.fromGenerator (chunkedGen (matching_ cfg serverPath startDate))
+  keys <- Streams.fromGenerator
+    (chunkedGen (matching_ cfg serverPath startDate))
   let !srvLen = T.length serverPath
   let inRange path = isBefore endDate (Date (T.drop srvLen path))
   takeWhileStream inRange keys
@@ -179,7 +181,8 @@ runRequest act0 = withRetries 3 300 act0
                        threadDelay (delayInMS * 1000)
                        withRetries (n - 1) (delayInMS + delayInMS) act
                       else do
-                        putStrLn $ "HTTP-Error: " ++ show e ++ "\nFATAL: Giving up"
+                        putStrLn $ "HTTP-Error: " ++ show e
+                                   ++ "\nFATAL: Giving up"
                         throwIO e)
 
 takeWhileStream :: (a -> Bool) -> InputStream a -> IO (InputStream a)
@@ -230,7 +233,7 @@ matching_ cfg@(Config awsCfg s3Cfg _ mgr bucket throttle) serverPath fromDate =
                              , S3.gbMaxKeys = defaultMaxKeys
                              , S3.gbMarker = marker
                              }
-       case map S3.objectKey (S3.gbrContents rsp) of  -- REVIEW: use Data.Vector?
+       case map S3.objectKey (S3.gbrContents rsp) of -- REVIEW: Data.Vector?
          [] -> return Done
          entries
           | Just maxKeys <- S3.gbrMaxKeys rsp , length entries < maxKeys
