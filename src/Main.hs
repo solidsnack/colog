@@ -27,6 +27,7 @@ import           Network.HTTP.Conduit ( withManager, Manager,
                                         HttpException(..) )
 import           System.Environment
 import           System.Exit ( exitFailure )
+import           System.IO
 import           System.IO.Streams ( InputStream, Generator, yield )
 import qualified System.IO.Streams as Streams
 
@@ -45,7 +46,7 @@ data Range = Range !DatePattern !DatePattern
 
 msg :: Config -> String -> IO ()
 msg Config{ cfgLoggerLock = lock } text =
-  withMVar lock (\_ -> putStrLn text)
+  withMVar lock (\_ -> hPutStrLn stderr text)
 
 defaultMaxKeys :: Maybe Int
 defaultMaxKeys = Just 1000
@@ -122,7 +123,9 @@ grabAndDistributeFiles queues = do
 
   unless (null queues') $ do
     let !nextMinute = minimum (map fst queues')
-    print (nextMinute, [ server | (_, (server, _, _)) <- queues' ])
+    forM_ [ server | (_, (server, _, _)) <- queues' ] $ \server -> do
+      putStrLn $ T.unpack server ++ T.unpack nextMinute
+    -- print (nextMinute, [ server | (_, (server, _, _)) <- queues' ])
     queues'' <- forM queues' $ \(minute, queue@(_, q, _)) -> do
                   when (minute == nextMinute) $ do
                     _ <- atomically (readTBQueue q)
@@ -147,7 +150,7 @@ type S3ObjectKey = T.Text
 lsS3 :: Config -> T.Text -> IO (InputStream T.Text)
 lsS3 cfg path = Streams.fromGenerator (chunkedGen (lsS3_ cfg path))
 
--- | Return an stream of minute file names matching the given date
+-- | Return a stream of minute file names matching the given date
 -- range.  Files are returned in ASCII-betical order.
 --
 -- The resulting stream is not thread-safe.
@@ -169,19 +172,19 @@ data Response a
   | Full !a
   | More !a (IO (Response a))
 
-runRequest :: ResourceT IO a -> IO a
-runRequest act0 = withRetries 3 300 act0
+runRequest :: Config -> ResourceT IO a -> IO a
+runRequest cfg act0 = withRetries 3 300 act0
  where
    withRetries :: Int -> Int -> ResourceT IO a -> IO a
    withRetries !n !delayInMS act =
      runResourceT act `catch` (\(e :: HttpException) -> do
                     if n > 0 then do
-                       putStrLn $ "HTTP-Error: " ++ show e ++ "\nRetrying in "
+                       msg cfg $ "HTTP-Error: " ++ show e ++ "\nRetrying in "
                                   ++ show delayInMS ++ "ms..."
                        threadDelay (delayInMS * 1000)
                        withRetries (n - 1) (delayInMS + delayInMS) act
                       else do
-                        putStrLn $ "HTTP-Error: " ++ show e
+                        msg cfg $ "HTTP-Error: " ++ show e
                                    ++ "\nFATAL: Giving up"
                         throwIO e)
 
@@ -197,7 +200,7 @@ lsS3_ :: Config -> S3Path -> IO (Response [S3Path])
 lsS3_ cfg0@(Config cfg s3cfg _ mgr bucket _throttle) path = go Nothing
  where
    go marker = do
-      runRequest $ do
+      runRequest cfg0 $ do
         liftIO $ msg cfg0 ("REQ: " ++ show path ++
                            maybe "" ((" FROM: "++) . show) marker)
         rsp <- Aws.pureAws cfg s3cfg mgr $!
@@ -223,7 +226,7 @@ matching_ cfg@(Config awsCfg s3Cfg _ mgr bucket throttle) serverPath fromDate =
   go (Just (serverPath <> toMarker fromDate))
  where
    go marker = Sem.with throttle $ do
-     runRequest $ do
+     runRequest cfg $ do
        liftIO $ msg cfg ("REQ: " ++ show serverPath ++
                           maybe "" ((" FROM: "++) . show) marker)
        rsp <- Aws.pureAws awsCfg s3Cfg mgr $!
