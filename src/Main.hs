@@ -50,7 +50,7 @@ msg Config{ cfgLoggerLock = lock } text =
   withMVar lock (\_ -> hPutStrLn stderr text)
 
 defaultMaxKeys :: Maybe Int
-defaultMaxKeys = Just 1000
+defaultMaxKeys = Nothing
 
 printUsage :: IO ()
 printUsage = do
@@ -102,7 +102,7 @@ main = do
 
   withManager $ \mgr -> liftIO $ do
 
-    throttle <- Sem.new 4
+    throttle <- Sem.new 20
 
     let cfg = Config { cfgAwsCfg = awsCfg
                      , cfgS3Cfg = s3cfg
@@ -129,7 +129,7 @@ main = do
     let !servers = {- take 10 -} all_servers
 
     queues <- forM servers $ \server -> do
-                q <- newTBQueueIO 1
+                q <- newTBQueueIO 10
                 worker <- async (processServer cfg server range q)
                 return (server, q, worker)
 
@@ -207,7 +207,7 @@ data Response a
   | More !a (IO (Response a))
 
 runRequest :: Config -> ResourceT IO a -> IO a
-runRequest cfg act0 = withRetries 3 300 act0
+runRequest cfg act0 = withRetries 8 5 act0
  where
    withRetries :: Int -> Int -> ResourceT IO a -> IO a
    withRetries !n !delayInMS act =
