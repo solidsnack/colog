@@ -1,0 +1,3 @@
+[submodule "bzlib-conduit"]
+	path = bzlib-conduit
+	url = https://github.com/nominolo/bzlib-conduit.git
