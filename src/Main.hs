@@ -141,14 +141,6 @@ main = do
 
     grabAndDistributeFiles cfg queues
 
-    -- objects <- withPool 4 $ \pool -> parallel pool $
-    --              [ Streams.toList =<< lsObjects cfg serverPath range
-    --              | serverPath <- servers
-    --              ]
-
-    -- mapM_ print objects
-    -- print (length (filter (not . null) objects))
-
 type ServerPath = S3Path
 
 type FileNameProducer = (ServerPath, TBQueue (Maybe S3ObjectKey), Async ())
@@ -181,18 +173,39 @@ startMinuteFileReaders cfg nextMinute minutes = do
 
 grabAndDistributeFiles :: Config -> [FileNameProducer] -> IO ()
 grabAndDistributeFiles _ [] = return ()
-grabAndDistributeFiles cfg producers = do
-  minutes <- nextAvailableMinutes producers
-  unless (null minutes) $ do
-    let !nextMinute = minimum (map fst minutes)
-    msg cfg ("OUT: " ++ T.unpack nextMinute)
-    t <- getCPUTime
-    lineProducers <- startMinuteFileReaders cfg nextMinute minutes
-    processAllLines cfg lineProducers B.putStr
-    t' <- getCPUTime
-    msg cfg ("DONE: " ++ T.unpack nextMinute ++ " "
-           ++ show (fromIntegral (t' - t) / 1000000000.0 :: Double) ++ " ms")
-    grabAndDistributeFiles cfg (map snd minutes)
+grabAndDistributeFiles cfg producers0 = do
+    queue <- newTBQueueIO 2
+    worker <- async (processLineWorker queue)
+    go queue producers0
+    atomically (writeTBQueue queue Nothing)
+    wait worker
+ where
+   go :: TBQueue (Maybe (IO ())) -> [FileNameProducer] -> IO ()
+   go _queue [] = return ()
+   go queue producers = do
+     minutes <- nextAvailableMinutes producers
+     unless (null minutes) $ do
+       let !nextMinute = minimum (map fst minutes)
+       lineProducers <- startMinuteFileReaders cfg nextMinute minutes
+
+       atomically $ writeTBQueue queue $ Just $ do
+         msg cfg ("OUT: " ++ T.unpack nextMinute)
+         t <- getCPUTime
+         processAllLines cfg lineProducers B.putStr
+         t' <- getCPUTime
+         msg cfg ("DONE: " ++ T.unpack nextMinute ++ " "
+                ++ show (fromIntegral (t' - t) / 1000000000.0 :: Double)
+                ++ " ms")
+
+       go queue (map snd minutes)
+
+   processLineWorker queue = do
+     mb_act <- atomically (readTBQueue queue)
+     case mb_act of
+       Nothing -> return ()
+       Just act -> do
+         _ <- act
+         processLineWorker queue
 
 processServer :: Config -> S3Path -> Range -> TBQueue (Maybe S3ObjectKey)
               -> IO ()
@@ -271,15 +284,9 @@ instance Ord a => Ord (SortByFirst a b) where
 type LineHeap = Heap.Heap (SortByFirst Line LineProducer)
 
 processAllLines :: Config -> [LineProducer] -> (Line -> IO ()) -> IO ()
-processAllLines cfg producers0 kont =
-   locked $ fillHeap Heap.empty producers0
+processAllLines _cfg producers0 kont =
+   fillHeap Heap.empty producers0
  where
-   locked act = do
-     let lockVar = cfgStdoutLock cfg
-     runningAct <- takeMVar lockVar
-     wait runningAct
-     putMVar lockVar =<< async act
-
    grabNextLine :: LineProducer -> LineHeap -> IO LineHeap
    grabNextLine producer@(process, var) !heap = do
      next <- atomically (popLine var)
