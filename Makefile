@@ -18,12 +18,16 @@ run: $(DIST)/build/$(EXEC)/$(EXEC)
 colog:
 	cabal install
 
-depends:
+depends: submodules
 	( cd bzlib-conduit/ && cabal install )
 	cabal install --only-dependencies
 
 install: depends
 	cabal install
+
+.PHONY: submodules
+submodules:
+	git submodule update --init
 
 .PHONY: clean
 clean:
