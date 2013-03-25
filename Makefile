@@ -18,6 +18,13 @@ run: $(DIST)/build/$(EXEC)/$(EXEC)
 colog:
 	cabal install
 
+depends:
+	( cd bzlib-conduit/ && cabal install )
+	cabal install --only-dependencies
+
+install: depends
+	cabal install
+
 .PHONY: clean
 clean:
 	rm -r ./$(DIST)
