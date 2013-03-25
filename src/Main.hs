@@ -30,6 +30,7 @@ import           System.Exit ( exitFailure )
 import           System.IO
 import           System.IO.Streams ( InputStream, Generator, yield )
 import qualified System.IO.Streams as Streams
+import           System.CPUTime
 
 import           DateMatch
 import           LineFilter
@@ -38,6 +39,7 @@ data Config = Config
   { cfgAwsCfg     :: !Aws.Configuration
   , cfgS3Cfg      :: !(S3.S3Configuration Aws.NormalQuery)
   , cfgLoggerLock :: !(MVar ())
+  , cfgStdoutLock :: !(MVar (Async ()))
   , cfgManager    :: !Manager
   , cfgBucketName :: !T.Text
   , cfgReadFileThrottle :: !(Sem.MSem Int)
@@ -90,6 +92,7 @@ main = do
     exitFailure
 
   loggerLock <- newMVar ()
+  stdoutLock <- newMVar =<< async (return ())
   throttle <- Sem.new 20
 
   withManager $ \mgr -> liftIO $ do
@@ -109,6 +112,7 @@ main = do
         cfg = Config { cfgAwsCfg = awsCfg
                      , cfgS3Cfg = s3cfg
                      , cfgLoggerLock = loggerLock
+                     , cfgStdoutLock = stdoutLock
                      , cfgManager = mgr
                      , cfgBucketName = bucketName
                      , cfgReadFileThrottle = throttle
@@ -170,7 +174,7 @@ startMinuteFileReaders cfg nextMinute minutes = do
     <- forM minutes $ \(minute, (server, q, _worker)) -> do
          if minute /= nextMinute then return Nothing else do
            _ <- atomically (readTBQueue q)
-           lineVar <- newEmptyTMVarIO
+           lineVar <- newLineBuffer
            producer <- async (processLines cfg (server <> minute) lineVar)
            return (Just (producer, lineVar))
   return (catMaybes lineProducers)
@@ -181,8 +185,13 @@ grabAndDistributeFiles cfg producers = do
   minutes <- nextAvailableMinutes producers
   unless (null minutes) $ do
     let !nextMinute = minimum (map fst minutes)
+    msg cfg ("OUT: " ++ T.unpack nextMinute)
+    t <- getCPUTime
     lineProducers <- startMinuteFileReaders cfg nextMinute minutes
     processAllLines cfg lineProducers B.putStr
+    t' <- getCPUTime
+    msg cfg ("DONE: " ++ T.unpack nextMinute ++ " "
+           ++ show (fromIntegral (t' - t) / 1000000000.0 :: Double) ++ " ms")
     grabAndDistributeFiles cfg (map snd minutes)
 
 processServer :: Config -> S3Path -> Range -> TBQueue (Maybe S3ObjectKey)
@@ -218,23 +227,38 @@ lsObjects cfg serverPath (Range startDate endDate) = do
   let inRange path = isBefore endDate (Date (T.drop srvLen path))
   takeWhileStream inRange keys
 
-processLines :: Config -> S3Path -> TMVar (Maybe Line) -> IO ()
+type LineBuffer a = TBQueue a  --TMVar a
+
+newLineBuffer :: IO (LineBuffer a)
+newLineBuffer = newTBQueueIO 100 --newEmptyTMVarIO
+
+pushLine :: LineBuffer a -> a -> STM ()
+pushLine = writeTBQueue --putTMVar
+
+popLine :: LineBuffer a -> STM a
+popLine = readTBQueue  --takeTMVar
+
+processLines :: Config -> S3Path -> LineBuffer (Maybe Line) -> IO ()
 processLines cfg objectPath output = do
   runRequest cfg $ do
-    liftIO $ msg cfg ("OBJECT: " ++ show objectPath)
+    --liftIO $ msg cfg ("OBJECT: " ++ show objectPath)
+    t <- liftIO $ getCPUTime
     rsp <- Aws.pureAws (cfgAwsCfg cfg) (cfgS3Cfg cfg)
                        (cfgManager cfg) $!
              S3.getObject (cfgBucketName cfg) objectPath
     let writeLine line =
-          liftIO (atomically (putTMVar output (Just line)))
+          liftIO (atomically (pushLine output (Just line)))
+    t' <- liftIO $ getCPUTime
+    liftIO $ msg cfg ("GOT_OBJECT: " ++ show objectPath ++ " "
+           ++ show (fromIntegral (t' - t) / 1000000000.0 :: Double) ++ " ms")
     responseBody (S3.gorResponse rsp) $$+-
       (bunzip2 =$
        csvLines =$
        sortWithWindow 500 =$
        csvLineSink (\l -> writeLine l >> return True))
-    liftIO (atomically (putTMVar output Nothing))
+    liftIO (atomically (pushLine output Nothing))
 
-type LineProducer = (Async (), TMVar (Maybe Line))
+type LineProducer = (Async (), LineBuffer (Maybe Line))
 
 data SortByFirst a b = SBF !a !b
 
@@ -247,12 +271,18 @@ instance Ord a => Ord (SortByFirst a b) where
 type LineHeap = Heap.Heap (SortByFirst Line LineProducer)
 
 processAllLines :: Config -> [LineProducer] -> (Line -> IO ()) -> IO ()
-processAllLines _cfg producers0 kont =
-   fillHeap Heap.empty producers0
+processAllLines cfg producers0 kont =
+   locked $ fillHeap Heap.empty producers0
  where
+   locked act = do
+     let lockVar = cfgStdoutLock cfg
+     runningAct <- takeMVar lockVar
+     wait runningAct
+     putMVar lockVar =<< async act
+
    grabNextLine :: LineProducer -> LineHeap -> IO LineHeap
    grabNextLine producer@(process, var) !heap = do
-     next <- atomically (takeTMVar var)
+     next <- atomically (popLine var)
      case next of
        Nothing -> do
          cancel process
@@ -308,14 +338,15 @@ takeWhileStream predicate input = Streams.fromGenerator go
              Just a -> if predicate a then yield a >> go else return ()
 
 lsS3_ :: Config -> S3Path -> IO (Response [S3Path])
-lsS3_ cfg0@(Config cfg s3cfg _ mgr bucket _throttle) path = go Nothing
+lsS3_ cfg path = go Nothing
  where
    go marker = do
-      runRequest cfg0 $ do
-        liftIO $ msg cfg0 ("REQ: " ++ show path ++
-                           maybe "" ((" FROM: "++) . show) marker)
-        rsp <- Aws.pureAws cfg s3cfg mgr $!
-                 S3.GetBucket{ S3.gbBucket = bucket
+      runRequest cfg $ do
+        liftIO $ msg cfg ("REQ: " ++ show path ++
+                          maybe "" ((" FROM: "++) . show) marker)
+        rsp <- Aws.pureAws (cfgAwsCfg cfg) (cfgS3Cfg cfg)
+                           (cfgManager cfg) $!
+                 S3.GetBucket{ S3.gbBucket = cfgBucketName cfg
                              , S3.gbPrefix = Just path
                              , S3.gbDelimiter = Just "/"
                              , S3.gbMaxKeys = defaultMaxKeys
@@ -333,15 +364,16 @@ lsS3_ cfg0@(Config cfg s3cfg _ mgr bucket _throttle) path = go Nothing
              return $! More entries (go $! Just marker')
 
 matching_ :: Config -> S3Path -> DatePattern -> IO (Response [S3ObjectKey])
-matching_ cfg@(Config awsCfg s3Cfg _ mgr bucket throttle) serverPath fromDate =
+matching_ cfg serverPath fromDate =
   go (Just (serverPath <> toMarker fromDate))
  where
-   go marker = Sem.with throttle $ do
+   go marker = Sem.with (cfgReadFileThrottle cfg) $ do
      runRequest cfg $ do
        liftIO $ msg cfg ("REQ: " ++ show serverPath ++
                           maybe "" ((" FROM: "++) . show) marker)
-       rsp <- Aws.pureAws awsCfg s3Cfg mgr $!
-                 S3.GetBucket{ S3.gbBucket = bucket
+       rsp <- Aws.pureAws (cfgAwsCfg cfg) (cfgS3Cfg cfg)
+                           (cfgManager cfg) $!
+                 S3.GetBucket{ S3.gbBucket = cfgBucketName cfg
                              , S3.gbPrefix = Just serverPath
                              , S3.gbDelimiter = Nothing
                              , S3.gbMaxKeys = defaultMaxKeys
