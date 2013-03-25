@@ -35,5 +35,5 @@ executable colog
 
   other-modules:        DateMatch
 
-  ghc-options:		-Wall
+  ghc-options:		-Wall -threaded -with-rtsopts=-N
   ghc-prof-options:	-auto-all
