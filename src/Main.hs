@@ -12,11 +12,8 @@ import           Control.Concurrent ( threadDelay )
 import           Control.Concurrent.Async
 import           Control.Concurrent.MVar
 import qualified Control.Concurrent.MSem as Sem
-import           Control.Concurrent.ParallelIO.Local ( withPool, parallel )
 import           Control.Concurrent.STM
-import           Control.Concurrent.STM.TBQueue
-import           Control.Concurrent.STM.TMVar
-import           Control.Monad ( when, forM, forM_, unless )
+import           Control.Monad ( when, forM, unless )
 import           Control.Monad.IO.Class
 import           Control.Exception ( catch, throwIO )
 import qualified Data.ByteString.Char8 as B
@@ -24,8 +21,6 @@ import           Data.Conduit ( runResourceT, ResourceT, ($$+-), (=$) )
 import           Data.Conduit.BZlib ( bunzip2 )
 import           Data.Maybe ( fromMaybe, catMaybes )
 import           Data.Monoid
-import qualified Data.Set as Set
-import qualified Data.Map as Map
 import qualified Data.Heap as Heap
 import qualified Data.Text as T
 import           Network.HTTP.Conduit ( withManager, Manager,
@@ -64,9 +59,9 @@ printUsage = do
 
 bucketParser :: Atto.Parser (T.Text, T.Text)
 bucketParser = do
-  Atto.string "s3://"
+  _ <- Atto.string "s3://"
   bucketName <- Atto.takeWhile (/= '/')
-  Atto.char '/'
+  _ <- Atto.char '/'
   rootPath <- Atto.takeText
   return (bucketName, rootPath)
 
@@ -252,7 +247,7 @@ instance Ord a => Ord (SortByFirst a b) where
 type LineHeap = Heap.Heap (SortByFirst Line LineProducer)
 
 processAllLines :: Config -> [LineProducer] -> (Line -> IO ()) -> IO ()
-processAllLines cfg producers0 kont =
+processAllLines _cfg producers0 kont =
    fillHeap Heap.empty producers0
  where
    grabNextLine :: LineProducer -> LineHeap -> IO LineHeap
@@ -267,7 +262,7 @@ processAllLines cfg producers0 kont =
          return heap'
 
    fillHeap :: LineHeap -> [LineProducer] -> IO ()
-   fillHeap !heap (producer@(process, var) : producers) = do
+   fillHeap !heap (producer : producers) = do
      heap' <- grabNextLine producer heap
      fillHeap heap' producers
    fillHeap !heap [] = consumeHeap heap
