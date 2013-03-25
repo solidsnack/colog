@@ -1,5 +1,9 @@
 {-# LANGUAGE BangPatterns #-}
-module LineFilter where
+module LineFilter
+  ( csvLines, sortWithWindow
+  , csvLineSink, Continue 
+  )
+where
 
 import           Control.Monad.IO.Class ( liftIO )
 import qualified Data.ByteString as B
@@ -7,8 +11,10 @@ import qualified Data.ByteString.Lazy as LB
 import           Data.Conduit
 import           Data.Conduit.Binary
 import           Data.Conduit.Lazy
+import qualified Data.Conduit.List as Conduit
 import           Data.Word
 import           Data.Char
+import qualified Data.Heap as Heap
 
 import Debug.Trace
 
@@ -67,6 +73,32 @@ findEndOfCsvRecord inp0 state = go state inp0 0
        Just n ->
          go Unquoted (B.drop (n + 1) inp) (offs + n + 1)
 
+-- | Partially sort the input stream via a fixed size buffer.
+sortWithWindow :: (Monad m, Ord a) => Int -> Conduit a m a
+sortWithWindow size | size < 2 = sortWithWindow 2
+sortWithWindow size = do
+  let !heap0 = Heap.empty
+  heap <- fillHeap size heap0
+  genOutput heap
+ where
+   fillHeap !n !heap
+     | n > 0 = do mb_x <- await
+                  case mb_x of
+                    Just x -> fillHeap (n - 1) (Heap.insert x heap)
+                    Nothing -> return heap
+     | otherwise = return heap
+
+   genOutput heap = do
+     case Heap.uncons heap of
+       Nothing ->
+         return ()
+       Just (next, heap') -> do
+         mb_x <- await
+         let !heap'' | Nothing <- mb_x = heap'
+                     | Just x <- mb_x  = Heap.insert x heap'
+         yield next
+         genOutput heap''
+
 {-
 -- Handles CSV records, which are delimited by newlines but allow quoting.
 -- Thus we scan for balanced quotes.
@@ -111,11 +143,13 @@ test1 = do
   testcsv csv2
   print "----"
   testcsv csv3
+  print "----"
+  xs <- Conduit.sourceList [1, 17, 8, 5, 9] $= sortWithWindow 3 $$ Conduit.consume
+  print (xs == [1, 5, 8, 9, 17])
  where 
    testcsv csv =
      let src = sourceLbs csv in
      src $= csvLines $$ csvLineSink (\line -> print line >> return True)
-
 
    str2bs = B.pack . map (fromIntegral . ord)
    csv1 = str2bs $ unlines ["fo\"uu\nmma\"o,bar,baz"

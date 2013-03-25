@@ -20,6 +20,7 @@ executable colog
         attoparsec              == 0.10.*,
         cmdtheline              == 0.2.*,
         containers              == 0.5.*,
+        heaps                   == 0.2.*,
         http-conduit            == 1.9.*,
         conduit                 == 1.0.*,
         transformers            == 0.3.*,
