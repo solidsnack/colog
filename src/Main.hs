@@ -1,4 +1,5 @@
-{-# LANGUAGE OverloadedStrings, BangPatterns, PatternGuards, ScopedTypeVariables #-}
+{-# LANGUAGE OverloadedStrings, BangPatterns, PatternGuards,
+             ScopedTypeVariables #-}
 
 module Main where
 
@@ -14,18 +15,21 @@ import qualified Control.Concurrent.MSem as Sem
 import           Control.Concurrent.ParallelIO.Local ( withPool, parallel )
 import           Control.Concurrent.STM
 import           Control.Concurrent.STM.TBQueue
+import           Control.Concurrent.STM.TMVar
 import           Control.Monad ( when, forM, forM_, unless )
 import           Control.Monad.IO.Class
 import           Control.Exception ( catch, throwIO )
 import qualified Data.ByteString.Char8 as B
-import           Data.Conduit ( runResourceT, ResourceT )
+import           Data.Conduit ( runResourceT, ResourceT, ($$+-), (=$) )
+import           Data.Conduit.BZlib ( bunzip2 )
 import           Data.Maybe ( fromMaybe, catMaybes )
 import           Data.Monoid
 import qualified Data.Set as Set
 import qualified Data.Map as Map
+import qualified Data.Heap as Heap
 import qualified Data.Text as T
 import           Network.HTTP.Conduit ( withManager, Manager,
-                                        HttpException(..) )
+                                        HttpException(..), responseBody )
 import           System.Environment
 import           System.Exit ( exitFailure )
 import           System.IO
@@ -33,6 +37,7 @@ import           System.IO.Streams ( InputStream, Generator, yield )
 import qualified System.IO.Streams as Streams
 
 import           DateMatch
+import           LineFilter
 
 data Config = Config 
   { cfgAwsCfg     :: !Aws.Configuration
@@ -79,7 +84,7 @@ main = do
   (bucketName, rootPath)
      <- case (Atto.parseOnly bucketParser (T.pack bucketNameAndrootPath)) of
           Right (b, r) -> return (b, r)
-          Left msg -> do
+          Left _msg -> do
             printUsage
             error "Failed to parse bucket"
 
@@ -89,22 +94,24 @@ main = do
                "AWS_SECRET_KEY\nare defined"
     exitFailure
 
-  let awsCfg = Aws.Configuration
+  loggerLock <- newMVar ()
+  throttle <- Sem.new 20
+
+  withManager $ \mgr -> liftIO $ do
+
+    let awsCfg = Aws.Configuration
                   { Aws.timeInfo = Aws.Timestamp
                   , Aws.credentials =
                       Aws.Credentials (B.pack access_key)
                                       (B.pack secret_key)
-                  , Aws.logger = Aws.defaultLog Aws.Warning }
+                  , Aws.logger = \lvl text -> 
+                                   if lvl < Aws.Warning then return () else
+                                     msg cfg (T.unpack text)
+                                 {- Aws.defaultLog Aws.Debug -} }
 
-  let s3cfg = Aws.defServiceConfig :: S3.S3Configuration Aws.NormalQuery
+        s3cfg = Aws.defServiceConfig :: S3.S3Configuration Aws.NormalQuery
 
-  loggerLock <- newMVar ()
-
-  withManager $ \mgr -> liftIO $ do
-
-    throttle <- Sem.new 20
-
-    let cfg = Config { cfgAwsCfg = awsCfg
+        cfg = Config { cfgAwsCfg = awsCfg
                      , cfgS3Cfg = s3cfg
                      , cfgLoggerLock = loggerLock
                      , cfgManager = mgr
@@ -133,7 +140,7 @@ main = do
                 worker <- async (processServer cfg server range q)
                 return (server, q, worker)
 
-    grabAndDistributeFiles queues
+    grabAndDistributeFiles cfg queues
 
     -- objects <- withPool 4 $ \pool -> parallel pool $
     --              [ Streams.toList =<< lsObjects cfg serverPath range
@@ -143,29 +150,45 @@ main = do
     -- mapM_ print objects
     -- print (length (filter (not . null) objects))
 
-grabAndDistributeFiles :: [(S3Path, TBQueue (Maybe S3ObjectKey), Async ())]
-                       -> IO ()
-grabAndDistributeFiles [] = return ()
-grabAndDistributeFiles queues = do
-  nextAvailMinutes <- forM queues $ \queue@(_, q, _) -> do
-                        mb_minute <- atomically (peekTBQueue q)
-                        case mb_minute of
-                          Nothing -> return Nothing
-                          Just minute ->
-                            return (Just (minute, queue))
-  let queues' = catMaybes nextAvailMinutes
+type ServerPath = S3Path
 
-  unless (null queues') $ do
-    let !nextMinute = minimum (map fst queues')
-    forM_ [ server | (_, (server, _, _)) <- queues' ] $ \server -> do
-      putStrLn $ T.unpack server ++ T.unpack nextMinute
-    -- print (nextMinute, [ server | (_, (server, _, _)) <- queues' ])
-    queues'' <- forM queues' $ \(minute, queue@(_, q, _)) -> do
-                  when (minute == nextMinute) $ do
-                    _ <- atomically (readTBQueue q)
-                    return ()
-                  return queue
-    grabAndDistributeFiles queues''
+type FileNameProducer = (ServerPath, TBQueue (Maybe S3ObjectKey), Async ())
+
+nextAvailableMinutes :: [FileNameProducer]
+                     -> IO [(S3ObjectKey, FileNameProducer)]
+nextAvailableMinutes [] = return []
+nextAvailableMinutes producers = do
+  mb_pairs
+    <- forM producers $ \ producer@(_,q,worker) -> do
+         mb_minute <- atomically (peekTBQueue q)
+         case mb_minute of
+           Nothing -> cancel worker >> return Nothing
+           Just minute -> return (Just (minute, producer))
+  return (catMaybes mb_pairs)
+
+startMinuteFileReaders :: Config
+                       -> S3ObjectKey
+                       -> [(S3ObjectKey, FileNameProducer)]
+                       -> IO [LineProducer]
+startMinuteFileReaders cfg nextMinute minutes = do
+  lineProducers
+    <- forM minutes $ \(minute, (server, q, _worker)) -> do
+         if minute /= nextMinute then return Nothing else do
+           _ <- atomically (readTBQueue q)
+           lineVar <- newEmptyTMVarIO
+           producer <- async (processLines cfg (server <> minute) lineVar)
+           return (Just (producer, lineVar))
+  return (catMaybes lineProducers)
+
+grabAndDistributeFiles :: Config -> [FileNameProducer] -> IO ()
+grabAndDistributeFiles _ [] = return ()
+grabAndDistributeFiles cfg producers = do
+  minutes <- nextAvailableMinutes producers
+  unless (null minutes) $ do
+    let !nextMinute = minimum (map fst minutes)
+    lineProducers <- startMinuteFileReaders cfg nextMinute minutes
+    processAllLines cfg lineProducers B.putStr
+    grabAndDistributeFiles cfg (map snd minutes)
 
 processServer :: Config -> S3Path -> Range -> TBQueue (Maybe S3ObjectKey)
               -> IO ()
@@ -178,6 +201,7 @@ processServer cfg serverPath range queue = do
   Streams.skipToEof =<< Streams.mapM_ writeOne keys
   atomically (writeTBQueue queue Nothing)
 
+type Line = B.ByteString
 type S3Path = T.Text
 type S3ObjectKey = T.Text
 
@@ -198,6 +222,64 @@ lsObjects cfg serverPath (Range startDate endDate) = do
   let !srvLen = T.length serverPath
   let inRange path = isBefore endDate (Date (T.drop srvLen path))
   takeWhileStream inRange keys
+
+processLines :: Config -> S3Path -> TMVar (Maybe Line) -> IO ()
+processLines cfg objectPath output = do
+  runRequest cfg $ do
+    liftIO $ msg cfg ("OBJECT: " ++ show objectPath)
+    rsp <- Aws.pureAws (cfgAwsCfg cfg) (cfgS3Cfg cfg)
+                       (cfgManager cfg) $!
+             S3.getObject (cfgBucketName cfg) objectPath
+    let writeLine line =
+          liftIO (atomically (putTMVar output (Just line)))
+    responseBody (S3.gorResponse rsp) $$+-
+      (bunzip2 =$
+       csvLines =$
+       sortWithWindow 500 =$
+       csvLineSink (\l -> writeLine l >> return True))
+    liftIO (atomically (putTMVar output Nothing))
+
+type LineProducer = (Async (), TMVar (Maybe Line))
+
+data SortByFirst a b = SBF !a !b
+
+instance Eq a => Eq (SortByFirst a b) where
+  SBF a1 _ == SBF a2 _ = a1 == a2
+
+instance Ord a => Ord (SortByFirst a b) where
+  SBF a1 _ `compare` SBF a2 _ = a1 `compare` a2
+
+type LineHeap = Heap.Heap (SortByFirst Line LineProducer)
+
+processAllLines :: Config -> [LineProducer] -> (Line -> IO ()) -> IO ()
+processAllLines cfg producers0 kont =
+   fillHeap Heap.empty producers0
+ where
+   grabNextLine :: LineProducer -> LineHeap -> IO LineHeap
+   grabNextLine producer@(process, var) !heap = do
+     next <- atomically (takeTMVar var)
+     case next of
+       Nothing -> do
+         cancel process
+         return heap
+       Just line -> do
+         let !heap' = Heap.insert (SBF line producer) heap
+         return heap'
+
+   fillHeap :: LineHeap -> [LineProducer] -> IO ()
+   fillHeap !heap (producer@(process, var) : producers) = do
+     heap' <- grabNextLine producer heap
+     fillHeap heap' producers
+   fillHeap !heap [] = consumeHeap heap
+
+   consumeHeap :: LineHeap -> IO ()
+   consumeHeap !heap =
+     case Heap.uncons heap of
+       Nothing -> return ()
+       Just (SBF line producer, heap') -> do
+         kont line
+         heap'' <- grabNextLine producer heap'
+         consumeHeap heap''
 
 --- Internals ----------------------------------------------------------
 

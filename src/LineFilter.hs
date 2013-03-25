@@ -5,7 +5,7 @@ module LineFilter
   )
 where
 
-import           Control.Monad.IO.Class ( liftIO )
+import           Control.Monad.IO.Class ( liftIO, MonadIO )
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as LB
 import           Data.Conduit
@@ -20,7 +20,7 @@ import Debug.Trace
 
 -- | Splits the input CSV file into lines.  Every returned line will
 -- end with a newline (0x0a).  Handles quoted input.
-csvLines :: Conduit B.ByteString IO B.ByteString
+csvLines :: Monad m => Conduit B.ByteString m B.ByteString
 csvLines = go [] Unquoted
  where
    go chunks parserState = do
@@ -121,7 +121,7 @@ step (StepState quoted index last) _ =
 
 type Continue = Bool
 
-csvLineSink :: (B.ByteString -> IO Continue) -> Sink B.ByteString IO ()
+csvLineSink :: (MonadIO m) => (B.ByteString -> IO Continue) -> Sink B.ByteString m ()
 csvLineSink f = loop 
  where 
    loop = do

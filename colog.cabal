@@ -18,6 +18,7 @@ executable colog
         aws                     == 0.7.*,
         async                   == 2.0.*,
         attoparsec              == 0.10.*,
+        bzlib-conduit           >= 0.2.1.1 && < 0.3,
         cmdtheline              == 0.2.*,
         containers              == 0.5.*,
         heaps                   == 0.2.*,
@@ -36,5 +37,5 @@ executable colog
 
   other-modules:        DateMatch
 
-  ghc-options:		-Wall -threaded -with-rtsopts=-N
+  ghc-options:		-Wall -threaded -with-rtsopts=-N -O2
   ghc-prof-options:	-auto-all
