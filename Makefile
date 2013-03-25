@@ -17,3 +17,7 @@ run: $(DIST)/build/$(EXEC)/$(EXEC)
 
 colog:
 	cabal install
+
+.PHONY: clean
+clean:
+	rm -r ./$(DIST)
