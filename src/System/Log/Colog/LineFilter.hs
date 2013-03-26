@@ -19,7 +19,9 @@ import qualified Data.Heap as Heap
 import Debug.Trace
 
 -- | Splits the input CSV file into lines.  Every returned line will
--- end with a newline (0x0a).  Handles quoted input.
+-- end with a newline (@0x0a@).  A line may contain quoted parts using
+-- double quotes.  Any character (including newline) except for the
+-- double quote character is allowed inside quotes.
 csvLines :: Monad m => Conduit B.ByteString m B.ByteString
 csvLines = go [] Unquoted
  where
@@ -35,6 +37,8 @@ csvLines = go [] Unquoted
        Just chunk -> do
          parse chunk chunks parserState
  
+   -- Parse a line:
+   --   line ::=  ([^"\n] | ["][^"]*["]) [\n]
    parse !chunk chunks parserState = do
      case findEndOfCsvRecord chunk parserState of
        Right idx -> do
@@ -74,6 +78,12 @@ findEndOfCsvRecord inp0 state = go state inp0 0
          go Unquoted (B.drop (n + 1) inp) (offs + n + 1)
 
 -- | Partially sort the input stream via a fixed size buffer.
+--
+-- Example:
+--
+-- > xs <- Conduit.sourceList [1, 17, 8, 5, 9]
+-- >         $= sortWithWindow 3 $$ Conduit.consume
+-- > assert (xs == [1, 5, 8, 9, 17])
 sortWithWindow :: (Monad m, Ord a) => Int -> Conduit a m a
 sortWithWindow size | size < 2 = sortWithWindow 2
 sortWithWindow size = do
@@ -121,7 +131,11 @@ step (StepState quoted index last) _ =
 
 type Continue = Bool
 
-csvLineSink :: (MonadIO m) => (B.ByteString -> IO Continue) -> Sink B.ByteString m ()
+-- | Calls the action on each input line received.  If the action
+-- returns 'True', continues processing the stream, otherwise it
+-- stops.
+csvLineSink :: (MonadIO m) => (B.ByteString -> IO Continue)
+            -> Sink B.ByteString m ()
 csvLineSink f = loop 
  where 
    loop = do
@@ -144,7 +158,8 @@ test1 = do
   print "----"
   testcsv csv3
   print "----"
-  xs <- Conduit.sourceList [1, 17, 8, 5, 9] $= sortWithWindow 3 $$ Conduit.consume
+  xs <- Conduit.sourceList [1, 17, 8, 5, 9]
+         $= sortWithWindow 3 $$ Conduit.consume
   print (xs == [1, 5, 8, 9, 17])
  where 
    testcsv csv =

@@ -20,9 +20,11 @@ newtype DatePattern = DatePattern T.Text
 
 instance Show DatePattern where show (DatePattern p) = T.unpack p
 
+-- | A pattern that matches any date.
 anyDate :: DatePattern
 anyDate = DatePattern ""
 
+-- | Parse a date pattern from a text.
 parseDatePattern :: T.Text -> Maybe DatePattern
 parseDatePattern input =
   -- TODO: input validation.
@@ -54,12 +56,17 @@ isBefore :: DatePattern -> Date -> Bool
 isBefore (DatePattern pat) (Date date) =
   pat `T.isPrefixOf` date || pat >= date
 
+-- | Returns the part of the pattern that only matches a day.
 dayPattern :: DatePattern -> DatePattern
 dayPattern (DatePattern pat) = DatePattern (T.take 10 pat)
 
+-- | Returns the part of the pattern that only matches a day and the
+-- hour.
 dayHourPattern :: DatePattern -> DatePattern
 dayHourPattern (DatePattern pat) = DatePattern (T.take 13 pat)
 
+-- | Returns the part of the pattern that only matches a day and the
+-- hour and the minute.
 dayHourMinutePattern :: DatePattern -> DatePattern
 dayHourMinutePattern (DatePattern pat) = DatePattern (T.take 16 pat)
 
