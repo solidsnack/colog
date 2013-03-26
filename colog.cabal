@@ -24,6 +24,7 @@ executable colog
         containers              == 0.5.*,
         heaps                   == 0.2.*,
         http-conduit            == 1.9.*,
+        http-types              == 0.8.*,
         conduit                 == 1.0.*,
         transformers            == 0.3.*,
         bytestring              == 0.10.*,

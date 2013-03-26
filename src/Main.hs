@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings, BangPatterns, PatternGuards,
-             ScopedTypeVariables, FlexibleInstances #-}
+             ScopedTypeVariables, FlexibleInstances, DeriveDataTypeable #-}
 
 module Main where
 
@@ -15,7 +15,7 @@ import qualified Control.Concurrent.MSem as Sem
 import           Control.Concurrent.STM
 import           Control.Monad ( when, forM, unless )
 import           Control.Monad.IO.Class
-import           Control.Exception ( catch, throwIO )
+import           Control.Exception ( catch, throwIO, Exception(..), SomeException )
 import qualified Data.ByteString.Char8 as B
 import           Data.Conduit ( runResourceT, ResourceT, ($$+-), (=$) )
 import           Data.Conduit.BZlib ( bunzip2 )
@@ -24,8 +24,10 @@ import           Data.Monoid
 import qualified Data.Heap as Heap
 import           Data.String ( fromString )
 import qualified Data.Text as T
-import           Network.HTTP.Conduit ( withManager, Manager,
+import           Data.Typeable ( Typeable(..) )
+import           Network.HTTP.Conduit ( withManager, Manager, responseHeaders,
                                         HttpException(..), responseBody )
+import           Network.HTTP.Types.Header ( hContentType )
 import           System.Console.CmdTheLine
 import           System.Environment
 import           System.Exit ( exitFailure )
@@ -179,7 +181,7 @@ program (LogRoot bucketName rootPath)
   loggerLock <- newMVar ()
   throttle <- Sem.new 20
 
-  withManager $ \mgr -> liftIO $ do
+  withManager $ \mgr -> liftIO $ (do
 
     let awsCfg = Aws.Configuration
                   { Aws.timeInfo = Aws.Timestamp
@@ -212,9 +214,13 @@ program (LogRoot bucketName rootPath)
     queues <- forM servers $ \server -> do
                 q <- newTBQueueIO 10
                 worker <- async (processServer cfg server range q)
+                link worker
                 return (server, q, worker)
 
-    grabAndDistributeFiles cfg queues
+    grabAndDistributeFiles cfg queues)
+      `catch` \(e :: SomeException) -> do
+        withMVar loggerLock (\_ -> hPutStrLn stderr (show e))
+        exitFailure
 
 type ServerPath = S3Path
 
@@ -225,10 +231,10 @@ nextAvailableMinutes :: [FileNameProducer]
 nextAvailableMinutes [] = return []
 nextAvailableMinutes producers = do
   mb_pairs
-    <- forM producers $ \ producer@(_,q,worker) -> do
+    <- forM producers $ \ producer@(_,q,_worker) -> do
          mb_minute <- atomically (peekTBQueue q)
          case mb_minute of
-           Nothing -> cancel worker >> return Nothing
+           Nothing -> return Nothing
            Just minute -> return (Just (minute, producer))
   return (catMaybes mb_pairs)
 
@@ -243,6 +249,7 @@ startMinuteFileReaders cfg nextMinute minutes = do
            _ <- atomically (readTBQueue q)
            lineVar <- newLineBuffer
            producer <- async (processLines cfg (server <> minute) lineVar)
+           link producer  -- make sure we fail if the producer files
            return (Just (producer, lineVar))
   return (catMaybes lineProducers)
 
@@ -251,6 +258,7 @@ grabAndDistributeFiles _ [] = return ()
 grabAndDistributeFiles cfg producers0 = do
     queue <- newTBQueueIO 2
     worker <- async (processLineWorker queue)
+    link worker
     go queue producers0
     atomically (writeTBQueue queue Nothing)
     wait worker
@@ -326,6 +334,18 @@ pushLine = writeTBQueue --putTMVar
 popLine :: LineBuffer a -> STM a
 popLine = readTBQueue  --takeTMVar
 
+bzip2ContentType :: B.ByteString
+bzip2ContentType = B.pack "application/x-bzip2"
+
+data UnsupportedContentType = UnsupportedContentType !S3Path !B.ByteString
+  deriving (Typeable)
+
+instance Exception UnsupportedContentType
+
+instance Show UnsupportedContentType where
+  show (UnsupportedContentType file ty) =
+    "File " ++ show file ++ " uses an unsupported content type: " ++ show ty
+
 processLines :: Config -> S3Path -> LineBuffer (Maybe Line) -> IO ()
 processLines cfg objectPath output = do
   runRequest cfg $ do
@@ -339,6 +359,13 @@ processLines cfg objectPath output = do
     t' <- liftIO $ getCPUTime
     liftIO $ debugMessage cfg ("GOT_OBJECT: " ++ show objectPath ++ " "
            ++ show (fromIntegral (t' - t) / 1000000000.0 :: Double) ++ " ms")
+    case lookup hContentType (responseHeaders (S3.gorResponse rsp)) of
+      Nothing -> return ()
+      Just enc ->
+        if enc /= bzip2ContentType then do
+          liftIO $ debugMessage cfg $ "Unsupported content type: " ++ show enc
+          liftIO $ throwIO $ UnsupportedContentType objectPath enc
+         else return ()
     responseBody (S3.gorResponse rsp) $$+-
       (bunzip2 =$
        csvLines =$
@@ -363,11 +390,10 @@ processAllLines _cfg producers0 kont =
    fillHeap Heap.empty producers0
  where
    grabNextLine :: LineProducer -> LineHeap -> IO LineHeap
-   grabNextLine producer@(process, var) !heap = do
+   grabNextLine producer@(_process, var) !heap = do
      next <- atomically (popLine var)
      case next of
        Nothing -> do
-         cancel process
          return heap
        Just line -> do
          let !heap' = Heap.insert (SBF line producer) heap
