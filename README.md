@@ -25,7 +25,11 @@ Examples:
     colog s3://mybucket/logs/ 2013-03-03T14:45
 
     # List all the logs from march until now
-    colog s3://mybucket/logs/ 2013-03/
+    colog s3://mybucket/logs/ 2013-03/...
+
+For more info type:
+
+    colog --help
 
 Filtering by seconds is currently not supported.
 
