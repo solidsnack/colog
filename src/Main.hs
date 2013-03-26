@@ -43,13 +43,20 @@ data Config = Config
   , cfgManager    :: !Manager
   , cfgBucketName :: !T.Text
   , cfgReadFileThrottle :: !(Sem.MSem Int)
+  , cfgLogLevel   :: !LogLevel
   }
+
+type LogLevel = Int
 
 data Range = Range !DatePattern !DatePattern
 
-msg :: Config -> String -> IO ()
-msg Config{ cfgLoggerLock = lock } text =
-  withMVar lock (\_ -> hPutStrLn stderr text)
+msg :: Config -> LogLevel -> String -> IO ()
+msg Config{ cfgLoggerLock = lock, cfgLogLevel = logLevel } level text =
+ if level > logLevel then return () else
+   withMVar lock (\_ -> hPutStrLn stderr text)
+
+debugMessage :: Config -> String -> IO ()
+debugMessage cfg text = msg cfg 2 text
 
 defaultMaxKeys :: Maybe Int
 defaultMaxKeys = Nothing
@@ -104,7 +111,7 @@ main = do
                                       (B.pack secret_key)
                   , Aws.logger = \lvl text -> 
                                    if lvl < Aws.Warning then return () else
-                                     msg cfg (T.unpack text)
+                                     debugMessage cfg (T.unpack text)
                                  {- Aws.defaultLog Aws.Debug -} }
 
         s3cfg = Aws.defServiceConfig :: S3.S3Configuration Aws.NormalQuery
@@ -116,6 +123,7 @@ main = do
                      , cfgManager = mgr
                      , cfgBucketName = bucketName
                      , cfgReadFileThrottle = throttle
+                     , cfgLogLevel = 0
                      }
 
     let (fromDateText, toDateText)
@@ -189,11 +197,11 @@ grabAndDistributeFiles cfg producers0 = do
        lineProducers <- startMinuteFileReaders cfg nextMinute minutes
 
        atomically $ writeTBQueue queue $ Just $ do
-         msg cfg ("OUT: " ++ T.unpack nextMinute)
+         debugMessage cfg ("OUT: " ++ T.unpack nextMinute)
          t <- getCPUTime
          processAllLines cfg lineProducers B.putStr
          t' <- getCPUTime
-         msg cfg ("DONE: " ++ T.unpack nextMinute ++ " "
+         debugMessage cfg ("DONE: " ++ T.unpack nextMinute ++ " "
                 ++ show (fromIntegral (t' - t) / 1000000000.0 :: Double)
                 ++ " ms")
 
@@ -254,7 +262,7 @@ popLine = readTBQueue  --takeTMVar
 processLines :: Config -> S3Path -> LineBuffer (Maybe Line) -> IO ()
 processLines cfg objectPath output = do
   runRequest cfg $ do
-    --liftIO $ msg cfg ("OBJECT: " ++ show objectPath)
+    --liftIO $ debugMessage cfg ("OBJECT: " ++ show objectPath)
     t <- liftIO $ getCPUTime
     rsp <- Aws.pureAws (cfgAwsCfg cfg) (cfgS3Cfg cfg)
                        (cfgManager cfg) $!
@@ -262,7 +270,7 @@ processLines cfg objectPath output = do
     let writeLine line =
           liftIO (atomically (pushLine output (Just line)))
     t' <- liftIO $ getCPUTime
-    liftIO $ msg cfg ("GOT_OBJECT: " ++ show objectPath ++ " "
+    liftIO $ debugMessage cfg ("GOT_OBJECT: " ++ show objectPath ++ " "
            ++ show (fromIntegral (t' - t) / 1000000000.0 :: Double) ++ " ms")
     responseBody (S3.gorResponse rsp) $$+-
       (bunzip2 =$
@@ -327,12 +335,12 @@ runRequest cfg act0 = withRetries 8 5 act0
    withRetries !n !delayInMS act =
      runResourceT act `catch` (\(e :: HttpException) -> do
                     if n > 0 then do
-                       msg cfg $ "HTTP-Error: " ++ show e ++ "\nRetrying in "
+                       debugMessage cfg $ "HTTP-Error: " ++ show e ++ "\nRetrying in "
                                   ++ show delayInMS ++ "ms..."
                        threadDelay (delayInMS * 1000)
                        withRetries (n - 1) (delayInMS + delayInMS) act
                       else do
-                        msg cfg $ "HTTP-Error: " ++ show e
+                        debugMessage cfg $ "HTTP-Error: " ++ show e
                                    ++ "\nFATAL: Giving up"
                         throwIO e)
 
@@ -349,7 +357,7 @@ lsS3_ cfg path = go Nothing
  where
    go marker = do
       runRequest cfg $ do
-        liftIO $ msg cfg ("REQ: " ++ show path ++
+        liftIO $ debugMessage cfg ("REQ: " ++ show path ++
                           maybe "" ((" FROM: "++) . show) marker)
         rsp <- Aws.pureAws (cfgAwsCfg cfg) (cfgS3Cfg cfg)
                            (cfgManager cfg) $!
@@ -376,7 +384,7 @@ matching_ cfg serverPath fromDate =
  where
    go marker = Sem.with (cfgReadFileThrottle cfg) $ do
      runRequest cfg $ do
-       liftIO $ msg cfg ("REQ: " ++ show serverPath ++
+       liftIO $ debugMessage cfg ("REQ: " ++ show serverPath ++
                           maybe "" ((" FROM: "++) . show) marker)
        rsp <- Aws.pureAws (cfgAwsCfg cfg) (cfgS3Cfg cfg)
                            (cfgManager cfg) $!
