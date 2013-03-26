@@ -1,5 +1,6 @@
 DIST ?=dist
 EXEC ?=colog
+INSTALL_OPTS ?=
 
 default: $(DIST)/build/$(EXEC)/$(EXEC)
 
@@ -19,8 +20,8 @@ colog:
 	cabal install
 
 depends: submodules
-	( cd bzlib-conduit/ && cabal install )
-	cabal install --only-dependencies
+	( cd bzlib-conduit/ && cabal install $(INSTALL_OPTS) )
+	cabal install --only-dependencies $(INSTALL_OPTS)
 
 install: depends
 	cabal install
