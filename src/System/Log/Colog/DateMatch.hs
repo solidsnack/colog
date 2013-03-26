@@ -1,5 +1,5 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving, OverloadedStrings #-}
-module DateMatch
+module System.Log.Colog.DateMatch
   ( anyDate,
     Date(..),
     DatePattern(..),

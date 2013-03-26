@@ -38,7 +38,8 @@ executable colog
   hs-source-dirs:	src
   main-is:		Main.hs
 
-  other-modules:        DateMatch
+  other-modules:        System.Log.Colog.DateMatch
+                        System.Log.Colog.LineFilter
 
   ghc-options:		-Wall -threaded -with-rtsopts=-N -O2
   ghc-prof-options:	-auto-all

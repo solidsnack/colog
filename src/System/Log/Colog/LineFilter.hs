@@ -1,5 +1,5 @@
 {-# LANGUAGE BangPatterns #-}
-module LineFilter
+module System.Log.Colog.LineFilter
   ( csvLines, sortWithWindow
   , csvLineSink, Continue 
   )

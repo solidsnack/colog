@@ -37,8 +37,8 @@ import qualified System.IO.Streams as Streams
 import           System.CPUTime
 import qualified Text.PrettyPrint as Pretty
 
-import           DateMatch
-import           LineFilter
+import           System.Log.Colog.DateMatch
+import           System.Log.Colog.LineFilter
 
 data Config = Config 
   { cfgAwsCfg     :: !Aws.Configuration
