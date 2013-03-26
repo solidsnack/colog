@@ -19,7 +19,8 @@ executable colog
         async                   == 2.0.*,
         attoparsec              == 0.10.*,
         bzlib-conduit           >= 0.2.1.1 && < 0.3,
-        cmdtheline              == 0.2.*,
+        cmdtheline              >= 0.2 && < 0.2.2,
+           -- 0.2.2 has broken output for --help
         containers              == 0.5.*,
         heaps                   == 0.2.*,
         http-conduit            == 1.9.*,
@@ -28,6 +29,7 @@ executable colog
         bytestring              == 0.10.*,
         io-streams              == 1.0.*,
         parallel-io             == 0.3.*,
+        pretty                  == 1.1.*,
         stm                     == 2.4.*,
         SafeSemaphore           == 0.9.*,
         text

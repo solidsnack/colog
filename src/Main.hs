@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings, BangPatterns, PatternGuards,
-             ScopedTypeVariables #-}
+             ScopedTypeVariables, FlexibleInstances #-}
 
 module Main where
 
@@ -22,15 +22,18 @@ import           Data.Conduit.BZlib ( bunzip2 )
 import           Data.Maybe ( fromMaybe, catMaybes )
 import           Data.Monoid
 import qualified Data.Heap as Heap
+import           Data.String ( fromString )
 import qualified Data.Text as T
 import           Network.HTTP.Conduit ( withManager, Manager,
                                         HttpException(..), responseBody )
+import           System.Console.CmdTheLine
 import           System.Environment
 import           System.Exit ( exitFailure )
 import           System.IO
 import           System.IO.Streams ( InputStream, Generator, yield )
 import qualified System.IO.Streams as Streams
 import           System.CPUTime
+import qualified Text.PrettyPrint as Pretty
 
 import           DateMatch
 import           LineFilter
@@ -39,7 +42,6 @@ data Config = Config
   { cfgAwsCfg     :: !Aws.Configuration
   , cfgS3Cfg      :: !(S3.S3Configuration Aws.NormalQuery)
   , cfgLoggerLock :: !(MVar ())
-  , cfgStdoutLock :: !(MVar (Async ()))
   , cfgManager    :: !Manager
   , cfgBucketName :: !T.Text
   , cfgReadFileThrottle :: !(Sem.MSem Int)
@@ -61,11 +63,6 @@ debugMessage cfg text = msg cfg 2 text
 defaultMaxKeys :: Maybe Int
 defaultMaxKeys = Nothing
 
-printUsage :: IO ()
-printUsage = do
-    hPutStrLn stderr $
-      "USAGE: colog s3://BUCKETNAME/LOGROOT/ FROMDATE[/TODATE]"
-
 bucketParser :: Atto.Parser (T.Text, T.Text)
 bucketParser = do
   _ <- Atto.string "s3://"
@@ -74,32 +71,112 @@ bucketParser = do
   rootPath <- Atto.takeText
   return (bucketName, rootPath)
 
+term :: Term (IO ())
+term = program <$> required (serverArg 0)
+               <*> required (patternArg 1)
+               <*> value (flag optDebug)
+ where
+   optDebug = (optInfo ["debug"])
+     { optDoc = "Turn on debug output." }
+
+data LogRoot = LogRoot !T.Text !T.Text
+  deriving Show
+
+instance ArgVal LogRoot where
+  converter = (argParser, argPrinter)
+   where
+     argParser str =
+       case Atto.parseOnly bucketParser (T.pack str) of
+         Right (bucket, path) -> Right (LogRoot bucket path)
+         _ -> Left "Invalid log server format"
+     argPrinter (LogRoot bucket path) =
+       "s3://" <> fromString (T.unpack bucket) <>
+       "/" <> fromString (T.unpack path)
+
+instance ArgVal (Maybe LogRoot) where converter = just
+
+serverArg :: Int -> Arg (Maybe LogRoot)
+serverArg n = pos n Nothing posInfo
+                { posName = "SERVER"
+                , posDoc = "s3://BUCKET/ROOTDIR/"
+                }
+
+data RangePattern = RangePattern !T.Text !T.Text
+  deriving Show
+
+instance ArgVal RangePattern where
+  converter = (argParser, argPrinter)
+   where
+     argParser str =
+       let !txt = T.pack str in
+       case T.splitOn "/" txt of
+         [start]
+           | Just start' <- verifyDate start
+           -> Right (RangePattern start' start')
+         [start,end]
+           | Just start' <- verifyDate start
+           , Just end'   <- verifyDate end
+           -> Right (RangePattern start' end')
+         _ -> Left "Could not parse date pattern."
+
+     argPrinter (RangePattern start end) =
+       let prettyWildCard p = if T.null p then "..." else p in
+       fromString (T.unpack (prettyWildCard start)) <> "/" <>
+       fromString (T.unpack (prettyWildCard end))
+
+     verifyDate date | date == "..."      = Just ""
+                     | T.length date > 0  = Just date
+                     | otherwise          = Nothing
+
+instance ArgVal (Maybe RangePattern) where converter = just
+
+patternArg :: Int -> Arg (Maybe RangePattern)
+patternArg n = pos n Nothing posInfo
+                 { posName = "STARTDATE[/ENDDATE]"
+                 , posDoc = "Start and optional end date of the logs to be " <>
+                            "requested.  A date can be any valid prefix of " <>
+                            "an ISO 8601 date.  The pattern \"...\" can be " <>
+                            "used to mean any date.  If the end date is " <>
+                            "missing then start date will be used in its " <>
+                            "place.\n\nExample: 2013-03-01T12:34"
+                 }
 
 main :: IO ()
-main = do
+main = run (term, defTI{ termName = colog
+                       , termDoc = doc
+                       , man = extraMan})
+ where
+   colog = "colog"
+   doc = "Aggregate and combine logs from several servers."
+   extraMan =
+     [ S "EXAMPLES"
+     , P "Note that all dates and times are in UTC time."
+     , I "List all logs from March 1st, 2013:"
+         (colog ++ " s3://mybucket/logs/ 2013-03-01")
+     , I "List all logs from March 1st, 2013, 14:15 to 14:30 (inclusive):"
+         (colog ++ " s3://mybucket/logs/ 2013-03-01T14:15/2013-03-01T14:30")
+     , I "List all logs from March 23st, 2013 until today:"
+         (colog ++ " s3://mybucket/logs/ 2013-03-23/...")
+     , I "List all logs before and including January 11st, 2013:"
+         (colog ++ " s3://mybucket/logs/ .../2013-01-11")
+     , I "List all logs:"
+         (colog ++ " s3://mybucket/logs/ ...")
+     ]
+
+program :: LogRoot -> RangePattern -> Bool -> IO ()
+program (LogRoot bucketName rootPath)
+        (RangePattern startDate endDate)
+        debug = do
   access_key <- fromMaybe "" <$> lookupEnv "AWS_ACCESS_KEY"
   secret_key <- fromMaybe "" <$> lookupEnv "AWS_SECRET_KEY"
 
-  args <- getArgs
-  when (length args < 3) $ do
-
-  bucketNameAndrootPath : otherArgs <- getArgs
-
-  (bucketName, rootPath)
-     <- case (Atto.parseOnly bucketParser (T.pack bucketNameAndrootPath)) of
-          Right (b, r) -> return (b, r)
-          Left _msg -> do
-            printUsage
-            error "Failed to parse bucket"
-
   when (any null [access_key, secret_key]) $ do
-    putStrLn $ "ERROR: Access key or secret key missing\n" ++
-               "Ensure that environment variables AWS_ACCESS_KEY and " ++
-               "AWS_SECRET_KEY\nare defined"
+    putStrLn . Pretty.render . Pretty.fsep . map Pretty.text . words $
+       "ERROR: Access key or secret key missing. Ensure that environment " ++
+       "variables AWS_ACCESS_KEY and AWS_SECRET_KEY are defined."
     exitFailure
 
   loggerLock <- newMVar ()
-  stdoutLock <- newMVar =<< async (return ())
   throttle <- Sem.new 20
 
   withManager $ \mgr -> liftIO $ do
@@ -119,24 +196,14 @@ main = do
         cfg = Config { cfgAwsCfg = awsCfg
                      , cfgS3Cfg = s3cfg
                      , cfgLoggerLock = loggerLock
-                     , cfgStdoutLock = stdoutLock
                      , cfgManager = mgr
                      , cfgBucketName = bucketName
                      , cfgReadFileThrottle = throttle
-                     , cfgLogLevel = 0
+                     , cfgLogLevel = if debug then 2 else 0
                      }
 
-    let (fromDateText, toDateText)
-          | [] <- otherArgs
-          = error "Missing date range"
-          | datePattern : _ <- otherArgs
-          = case T.splitOn "/" (T.pack datePattern) of
-              [start] -> (start, start)
-              start:end:_ -> (start, end)
-              _ -> error "splitOn returned empty list"
-
-    let Just fromDate = parseDatePattern fromDateText
-        Just toDate   = parseDatePattern toDateText
+    let Just fromDate = parseDatePattern startDate
+        Just toDate   = parseDatePattern endDate
         range = Range fromDate toDate
 
     all_servers <- Streams.toList =<< lsS3 cfg rootPath
