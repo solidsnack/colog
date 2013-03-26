@@ -128,10 +128,10 @@ main = do
 
     let (fromDateText, toDateText)
           | [] <- otherArgs
-          = ("2013-03-10T10:10", "2013-03-10T10:14")
+          = error "Missing date range"
           | datePattern : _ <- otherArgs
           = case T.splitOn "/" (T.pack datePattern) of
-              [start] -> (start, "")
+              [start] -> (start, start)
               start:end:_ -> (start, end)
               _ -> error "splitOn returned empty list"
 
