@@ -52,7 +52,7 @@ data Config = Config
 
 type LogLevel = Int
 
-data Range = Range !DatePattern !DatePattern
+data Range = Range !DatePrefix !DatePrefix
 
 msg :: Config -> LogLevel -> String -> IO ()
 msg Config{ cfgLoggerLock = lock, cfgLogLevel = logLevel } level text =
@@ -204,8 +204,8 @@ program (LogRoot bucketName rootPath)
                      , cfgLogLevel = if debug then 2 else 0
                      }
 
-    let Just fromDate = parseDatePattern startDate
-        Just toDate   = parseDatePattern endDate
+    let Just fromDate = parseDatePrefix startDate
+        Just toDate   = parseDatePrefix endDate
         range = Range fromDate toDate
 
     all_servers <- Streams.toList =<< lsS3 cfg rootPath
@@ -471,7 +471,7 @@ lsS3_ cfg path = go Nothing
              let !marker' = last entries
              return $! More entries (go $! Just marker')
 
-matching_ :: Config -> S3Path -> DatePattern -> IO (Response [S3ObjectKey])
+matching_ :: Config -> S3Path -> DatePrefix -> IO (Response [S3ObjectKey])
 matching_ cfg serverPath fromDate =
   go (Just (serverPath <> toMarker fromDate))
  where
