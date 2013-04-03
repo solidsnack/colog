@@ -3,9 +3,10 @@ module System.Log.Colog.DateMatch
   ( anyDate,
     Date(..),
     DatePrefix(..),
-    parseDatePrefix, toMarker,
+    toMarker,
     isAfter, isBefore,
-    dayPattern, dayHourPattern, dayHourMinutePattern
+    dayPattern, dayHourPattern, dayHourMinutePattern,
+    parseDateRange
   )
 where
 
@@ -31,20 +32,28 @@ isIsoDate _ = True  -- FIXME: implement this
 newtype Date = Date T.Text
   deriving (Eq, Ord)
 
-newtype DatePrefix = DatePrefix T.Text
+data DatePrefix = DatePrefix !T.Text !T.Text
   deriving (Eq, Ord)
 
-instance Show DatePrefix where show (DatePrefix p) = T.unpack p
+instance Show DatePrefix where
+  show (DatePrefix isoDate _slashed) =
+    if T.null isoDate then "..." else T.unpack isoDate
+
+datePrefixPath :: DatePrefix -> T.Text
+datePrefixPath (DatePrefix _ slashed) = slashed
 
 -- | A pattern that matches any date.
 anyDate :: DatePrefix
-anyDate = DatePrefix ""
+anyDate = DatePrefix "" ""
+
+mkDatePrefix :: T.Text -> DatePrefix
+mkDatePrefix isoDate = DatePrefix isoDate (slashify isoDate)
 
 -- | Parse a range of dates, possibly relative to the current time.
 --
 -- Examples:
--- > "-3m"         =>  (now - 3 min, now)
--- > "-30m/-20m"   =>  (now - 30 min, now - 20 min)
+-- > "T-3m"         =>  (now - 3 min, now)
+-- > "T-30m/T-20m"   =>  (now - 30 min, now - 20 min)
 -- > "2013-03-01"  =>  ("2013-03-01*", "2013-03-01*")
 -- > "2013-03-01T14:23/+3h"
 -- >               =>  ("2013-03-01T14:23*", "2013-03-01T17:23*")
@@ -69,7 +78,7 @@ parseDateRange now input = do
      = let !prefix = datePatternToDatePrefix now Nothing datePat in
        Just prefix
      | UtcPrefix prefix <- datePat
-     = Just $! DatePrefix prefix
+     = Just $! mkDatePrefix prefix
      | Wildcard <- datePat
      = Just anyDate
      | otherwise
@@ -113,7 +122,7 @@ parseDateParser :: Atto.Parser DatePattern
 parseDateParser = relativeDate <|> utcPrefix <|> wildcard
  where
    relativeDate = do
-     positive <- ((True <$ char '+') <|> (False <$ char '-')) <?> "+/-"
+     positive <- ((True <$ char '+') <|> (False <$ Atto.asciiCI "T-"))
      deltas <- many1 ((,) <$> decimal <*> unit)
      let sortedDeltas = nubBy ((==) `on` snd) $ sortBy (comparing snd) deltas
      if length sortedDeltas /= length deltas then
@@ -155,8 +164,8 @@ datePatternToDatePrefix ::
                       -- this prefix.
   -> DatePattern
   -> DatePrefix
-datePatternToDatePrefix _now _base (UtcPrefix text) = DatePrefix text
-datePatternToDatePrefix _now _base Wildcard         = DatePrefix ""
+datePatternToDatePrefix _now _base (UtcPrefix text) = mkDatePrefix text
+datePatternToDatePrefix _now _base Wildcard         = mkDatePrefix ""
 datePatternToDatePrefix now Nothing (RelDate pos units) =
   let diffTime = foldl' accumulateUnits 0 units
       utcTime =
@@ -173,11 +182,11 @@ datePatternToDatePrefix now Nothing (RelDate pos units) =
    unitToSeconds Hour   = 60 * 60
    unitToSeconds Day    = 24 * 60 * 60
 
-datePatternToDatePrefix now (Just base@(DatePrefix basePrefix))
+datePatternToDatePrefix now (Just base@(DatePrefix basePrefix _))
                         date@(RelDate pos units) =
   let Just time = datePrefixToUTCTime base in
-  let DatePrefix prefix = datePatternToDatePrefix time Nothing date in
-  DatePrefix $! T.take (max (T.length basePrefix) accuracyDistance) prefix
+  let DatePrefix prefix _ = datePatternToDatePrefix time Nothing date in
+  mkDatePrefix $! T.take (max (T.length basePrefix) accuracyDistance) prefix
  where
    mostAccurateUnit = maximum (map snd units)
    accuracyDistance =
@@ -187,7 +196,7 @@ datePatternToDatePrefix now (Just base@(DatePrefix basePrefix))
        Minute -> 16
 
 utcTimeToDatePrefix :: UTCTime -> DatePrefix
-utcTimeToDatePrefix t = DatePrefix . T.pack $
+utcTimeToDatePrefix t = mkDatePrefix . T.pack $
   formatTime defaultTimeLocale "%Y-%m-%dT%H:%M" t
 
 -- | Parse a date pattern from a text.
@@ -196,14 +205,18 @@ parseDatePrefix input =
   -- TODO: input validation.
   --  "2013-03-03T15:49"
   let full = T.take 16 input in
-  Just (DatePrefix $! T.map slashify full)
+  Just $! mkDatePrefix full
  where
-   slashify 'T' = '/'
-   slashify ':' = '/'
-   slashify x   = x
+
+slashify :: T.Text -> T.Text
+slashify date = T.map slashify' date
+ where
+   slashify' 'T' = '/'
+   slashify' ':' = '/'
+   slashify' x   = x
 
 datePrefixToUTCTime :: DatePrefix -> Maybe UTCTime
-datePrefixToUTCTime (DatePrefix prefix) = do
+datePrefixToUTCTime (DatePrefix prefix _) = do
   let zeroDate = "1970-01-01T00:00"
       !date = prefix `T.append` (T.drop (T.length prefix) zeroDate)
   parseTime defaultTimeLocale "%Y-%m-%dT%H:%M" (T.unpack date)
@@ -215,7 +228,7 @@ datePrefixToUTCTime (DatePrefix prefix) = do
 -- > isAfter "2013-03" "2013-04-01" == True
 -- > isAfter "2013-03" "2013-02-28" == False
 isAfter :: DatePrefix -> Date -> Bool
-isAfter (DatePrefix pat) (Date date) =
+isAfter (DatePrefix _ pat) (Date date) =
   pat `T.isPrefixOf` date || pat <= date
 
 -- | Checks if the date is matches the given date range or occurs
@@ -225,25 +238,25 @@ isAfter (DatePrefix pat) (Date date) =
 -- > isBefore "2013-03" "2013-04-01" == True
 -- > isBefore "2013-03" "2013-02-28" == False
 isBefore :: DatePrefix -> Date -> Bool
-isBefore (DatePrefix pat) (Date date) =
+isBefore (DatePrefix _ pat) (Date date) =
   pat `T.isPrefixOf` date || pat >= date
 
 -- | Returns the part of the pattern that only matches a day.
 dayPattern :: DatePrefix -> DatePrefix
-dayPattern (DatePrefix pat) = DatePrefix (T.take 10 pat)
+dayPattern (DatePrefix pat _) = mkDatePrefix (T.take 10 pat)
 
 -- | Returns the part of the pattern that only matches a day and the
 -- hour.
 dayHourPattern :: DatePrefix -> DatePrefix
-dayHourPattern (DatePrefix pat) = DatePrefix (T.take 13 pat)
+dayHourPattern (DatePrefix pat _) = mkDatePrefix (T.take 13 pat)
 
 -- | Returns the part of the pattern that only matches a day and the
 -- hour and the minute.
 dayHourMinutePattern :: DatePrefix -> DatePrefix
-dayHourMinutePattern (DatePrefix pat) = DatePrefix (T.take 16 pat)
+dayHourMinutePattern (DatePrefix pat _) = mkDatePrefix (T.take 16 pat)
 
 toMarker :: DatePrefix -> T.Text
-toMarker (DatePrefix pat) = pat
+toMarker (DatePrefix _ pat) = pat
 
 test1 :: IO ()
 test1 = do
@@ -302,25 +315,25 @@ test5 = do
 
 test6 = do
   let oldnow = read "2013-03-27 14:08:16.952677 UTC" :: UTCTime
-  print $ parseDateRange oldnow "-5m"
-  print $ parseDateRange oldnow "-5h"
-  print $ parseDateRange oldnow "-5h/-4h"
-  print $ parseDateRange oldnow "-5h/+30m"
+  print $ parseDateRange oldnow "T-5m"
+  print $ parseDateRange oldnow "T-5h"
+  print $ parseDateRange oldnow "T-5h/T-4h"
+  print $ parseDateRange oldnow "T-5h/+30m"
   print $ parseDateRange oldnow "2013-03-01/+30m"
   print $ parseDateRange oldnow "2013-03-01/+1h"
   print $ parseDateRange oldnow "2013-03-01/+3d"
-  print $ parseDateRange oldnow "-5h/+1h"
-  print $ parseDateRange oldnow "-5h/+1h30m"
-  print $ parseDateRange oldnow "2013-03-26/-1h30m"
+  print $ parseDateRange oldnow "T-5h/+1h"
+  print $ parseDateRange oldnow "T-5h/+1h30m"
+  print $ parseDateRange oldnow "2013-03-26/T-1h30m"
   print $ parseDateRange oldnow ""   -- invalid
   print $ parseDateRange oldnow "2013"
   print $ parseDateRange oldnow "2013/+5d"
   print $ parseDateRange oldnow "+5d"  -- invalid
-  print $ parseDateRange oldnow "-5d"
-  print $ parseDateRange oldnow "-5d/..."
+  print $ parseDateRange oldnow "T-5d"
+  print $ parseDateRange oldnow "T-5d/..."
   -- The following is not accepted.  It could be interpreted to mean:
   -- "Give me the first 5 days of logs that were ever recorded".
   -- However, that would require consulting the logs to figure out
   -- what the start-of-log date is, so we reject it for now.
   print $ parseDateRange oldnow ".../+5d"
-  print $ parseDateRange oldnow ".../-5d"
+  print $ parseDateRange oldnow ".../T-5d"

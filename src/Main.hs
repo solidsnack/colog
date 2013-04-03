@@ -24,6 +24,7 @@ import           Data.Monoid
 import qualified Data.Heap as Heap
 import           Data.String ( fromString )
 import qualified Data.Text as T
+import           Data.Time.Clock ( getCurrentTime )
 import           Data.Typeable ( Typeable(..) )
 import           Network.HTTP.Conduit ( withManager, Manager, responseHeaders,
                                         HttpException(..), responseBody )
@@ -53,6 +54,7 @@ data Config = Config
 type LogLevel = Int
 
 data Range = Range !DatePrefix !DatePrefix
+  deriving (Show)
 
 msg :: Config -> LogLevel -> String -> IO ()
 msg Config{ cfgLoggerLock = lock, cfgLogLevel = logLevel } level text =
@@ -103,32 +105,14 @@ serverArg n = pos n Nothing posInfo
                 , posDoc = "s3://BUCKET/ROOTDIR/"
                 }
 
-data RangePattern = RangePattern !T.Text !T.Text
+data RangePattern = RangePattern !T.Text
   deriving Show
 
 instance ArgVal RangePattern where
   converter = (argParser, argPrinter)
    where
-     argParser str =
-       let !txt = T.pack str in
-       case T.splitOn "/" txt of
-         [start]
-           | Just start' <- verifyDate start
-           -> Right (RangePattern start' start')
-         [start,end]
-           | Just start' <- verifyDate start
-           , Just end'   <- verifyDate end
-           -> Right (RangePattern start' end')
-         _ -> Left "Could not parse date pattern."
-
-     argPrinter (RangePattern start end) =
-       let prettyWildCard p = if T.null p then "..." else p in
-       fromString (T.unpack (prettyWildCard start)) <> "/" <>
-       fromString (T.unpack (prettyWildCard end))
-
-     verifyDate date | date == "..."      = Just ""
-                     | T.length date > 0  = Just date
-                     | otherwise          = Nothing
+     argParser str = Right (RangePattern (T.pack str))
+     argPrinter (RangePattern str) = fromString (T.unpack str)
 
 instance ArgVal (Maybe RangePattern) where converter = just
 
@@ -165,18 +149,33 @@ main = run (term, defTI{ termName = colog
          (colog ++ " s3://mybucket/logs/ ...")
      ]
 
+para :: String -> Pretty.Doc
+para = Pretty.fsep . map Pretty.text . words
+
+err :: Pretty.Doc -> IO a
+err doc = hPutStrLn stderr (Pretty.render doc) >> exitFailure
+
+expectJustOrFail :: Maybe a -> Pretty.Doc -> IO a
+expectJustOrFail Nothing errMsg = err errMsg
+expectJustOrFail (Just x) _     = return x
+
 program :: LogRoot -> RangePattern -> Bool -> IO ()
 program (LogRoot bucketName rootPath)
-        (RangePattern startDate endDate)
+        (RangePattern rangeText)
         debug = do
   access_key <- fromMaybe "" <$> lookupEnv "AWS_ACCESS_KEY"
   secret_key <- fromMaybe "" <$> lookupEnv "AWS_SECRET_KEY"
 
   when (any null [access_key, secret_key]) $ do
-    putStrLn . Pretty.render . Pretty.fsep . map Pretty.text . words $
-       "ERROR: Access key or secret key missing. Ensure that environment " ++
-       "variables AWS_ACCESS_KEY and AWS_SECRET_KEY are defined."
-    exitFailure
+    err $ para $
+      "ERROR: Access key or secret key missing. Ensure that environment " ++
+      "variables AWS_ACCESS_KEY and AWS_SECRET_KEY are defined."
+
+  now <- getCurrentTime
+  (fromDate, toDate)
+     <- parseDateRange now rangeText `expectJustOrFail` (para $
+          "Could not parse date range. Invoke program with --help for " ++
+          "info on supported syntax.")
 
   loggerLock <- newMVar ()
   throttle <- Sem.new 20
@@ -204,9 +203,8 @@ program (LogRoot bucketName rootPath)
                      , cfgLogLevel = if debug then 2 else 0
                      }
 
-    let Just fromDate = parseDatePrefix startDate
-        Just toDate   = parseDatePrefix endDate
-        range = Range fromDate toDate
+    let range = Range fromDate toDate
+    debugMessage cfg (show range)
 
     all_servers <- Streams.toList =<< lsS3 cfg rootPath
     let !servers = {- take 10 -} all_servers
