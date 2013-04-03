@@ -52,58 +52,51 @@ anyDate = DatePrefix ""
 -- >               =>  ("2013-03-01T14:23*", "2013-03-01T17:24*")
 -- > "2013-02-28/+2d"
 -- >               =>  ("2013-02-28*", "2013-03-02*")
-parseDateRange :: UTCTime -> T.Text -> IO (Maybe (DatePrefix, DatePrefix))
+parseDateRange :: UTCTime -> T.Text -> Maybe (DatePrefix, DatePrefix)
 parseDateRange now input = do
   case T.splitOn "/" input of
     [one]        -> singlePattern now one
     [start, end] -> rangePattern now start end
-    _            -> return Nothing
+    _            -> Nothing
  where
    parseAbsoluteDate now date =
      case Atto.parseOnly parseDateParser date of
-       Left _msg     -> return Nothing
+       Left _msg     -> Nothing
        Right datePat -> absoluteDateToPrefix now datePat
 
    absoluteDateToPrefix now datePat
      | RelDate False deltas <- datePat
-     = do
-       let !prefix = datePatternToDatePrefix now Nothing datePat
-       return (Just prefix)
+     = let !prefix = datePatternToDatePrefix now Nothing datePat in
+       Just prefix
      | UtcPrefix prefix <- datePat
-     = return (Just $! DatePrefix prefix)
+     = Just $! DatePrefix prefix
      | Wildcard <- datePat
-     = return (Just anyDate)
+     = Just anyDate
      | otherwise
-     = return Nothing
+     = Nothing
 
    singlePattern now one = do
-     mb_prefix <- parseAbsoluteDate now one
-     return $! do prefix <- mb_prefix
-                  return (prefix, prefix)
+     prefix <- parseAbsoluteDate now one
+     return (prefix, prefix)
 
    parseAbsoluteOrRelativeDate :: UTCTime -> DatePrefix -> T.Text
-                               -> IO (Maybe DatePrefix)
+                               -> Maybe DatePrefix
    parseAbsoluteOrRelativeDate now startPrefix date =
      case Atto.parseOnly parseDateParser date of
-       Left _msg -> return Nothing
+       Left _msg -> Nothing
        Right datePat
          | RelDate True deltas <- datePat -- +XhYm
          -> if startPrefix == anyDate then
-              return Nothing
+              Nothing
              else
-              return $! Just $! datePatternToDatePrefix now
-                                  (Just startPrefix) datePat
+              Just $! datePatternToDatePrefix now (Just startPrefix) datePat
          | otherwise
          -> absoluteDateToPrefix now datePat
 
    rangePattern now start end = do
-     mb_start <- parseAbsoluteDate now start
-     case mb_start of
-       Nothing -> return Nothing
-       Just startPrefix -> do
-         mb_end <- parseAbsoluteOrRelativeDate now startPrefix end
-         return $! do endPrefix <- mb_end
-                      return (startPrefix, endPrefix)
+     startPrefix <- parseAbsoluteDate now start
+     endPrefix <- parseAbsoluteOrRelativeDate now startPrefix end
+     return (startPrefix, endPrefix)
 
 data DatePattern
   = UtcPrefix !T.Text
@@ -309,25 +302,25 @@ test5 = do
 
 test6 = do
   let oldnow = read "2013-03-27 14:08:16.952677 UTC" :: UTCTime
-  print =<< parseDateRange oldnow "-5m"
-  print =<< parseDateRange oldnow "-5h"
-  print =<< parseDateRange oldnow "-5h/-4h"
-  print =<< parseDateRange oldnow "-5h/+30m"
-  print =<< parseDateRange oldnow "2013-03-01/+30m"
-  print =<< parseDateRange oldnow "2013-03-01/+1h"
-  print =<< parseDateRange oldnow "2013-03-01/+3d"
-  print =<< parseDateRange oldnow "-5h/+1h"
-  print =<< parseDateRange oldnow "-5h/+1h30m"
-  print =<< parseDateRange oldnow "2013-03-26/-1h30m"
-  print =<< parseDateRange oldnow ""
-  print =<< parseDateRange oldnow "2013"
-  print =<< parseDateRange oldnow "2013/+5d"
-  print =<< parseDateRange oldnow "+5d"
-  print =<< parseDateRange oldnow "-5d"
-  print =<< parseDateRange oldnow "-5d/..."
+  print $ parseDateRange oldnow "-5m"
+  print $ parseDateRange oldnow "-5h"
+  print $ parseDateRange oldnow "-5h/-4h"
+  print $ parseDateRange oldnow "-5h/+30m"
+  print $ parseDateRange oldnow "2013-03-01/+30m"
+  print $ parseDateRange oldnow "2013-03-01/+1h"
+  print $ parseDateRange oldnow "2013-03-01/+3d"
+  print $ parseDateRange oldnow "-5h/+1h"
+  print $ parseDateRange oldnow "-5h/+1h30m"
+  print $ parseDateRange oldnow "2013-03-26/-1h30m"
+  print $ parseDateRange oldnow ""   -- invalid
+  print $ parseDateRange oldnow "2013"
+  print $ parseDateRange oldnow "2013/+5d"
+  print $ parseDateRange oldnow "+5d"  -- invalid
+  print $ parseDateRange oldnow "-5d"
+  print $ parseDateRange oldnow "-5d/..."
   -- The following is not accepted.  It could be interpreted to mean:
   -- "Give me the first 5 days of logs that were ever recorded".
   -- However, that would require consulting the logs to figure out
   -- what the start-of-log date is, so we reject it for now.
-  print =<< parseDateRange oldnow ".../+5d"
-  print =<< parseDateRange oldnow ".../-5d"
+  print $ parseDateRange oldnow ".../+5d"
+  print $ parseDateRange oldnow ".../-5d"
