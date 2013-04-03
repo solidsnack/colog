@@ -49,6 +49,7 @@ data Config = Config
   , cfgBucketName :: !T.Text
   , cfgReadFileThrottle :: !(Sem.MSem Int)
   , cfgLogLevel   :: !LogLevel
+  , cfgAppendInstanceId :: !Bool
   }
 
 type LogLevel = Int
@@ -79,9 +80,12 @@ term :: Term (IO ())
 term = program <$> required (serverArg 0)
                <*> required (patternArg 1)
                <*> value (flag optDebug)
+               <*> value (flag optAppendInstanceId)
  where
    optDebug = (optInfo ["debug"])
      { optDoc = "Turn on debug output." }
+   optAppendInstanceId = (optInfo ["append-instance-id"])
+     { optDoc = "Append the server's instance id to each log entry line." }
 
 data LogRoot = LogRoot !T.Text !T.Text
   deriving Show
@@ -159,10 +163,10 @@ expectJustOrFail :: Maybe a -> Pretty.Doc -> IO a
 expectJustOrFail Nothing errMsg = err errMsg
 expectJustOrFail (Just x) _     = return x
 
-program :: LogRoot -> RangePattern -> Bool -> IO ()
+program :: LogRoot -> RangePattern -> Bool -> Bool -> IO ()
 program (LogRoot bucketName rootPath)
         (RangePattern rangeText)
-        debug = do
+        debug appendInstanceId = do
   access_key <- fromMaybe "" <$> lookupEnv "AWS_ACCESS_KEY"
   secret_key <- fromMaybe "" <$> lookupEnv "AWS_SECRET_KEY"
 
@@ -201,6 +205,7 @@ program (LogRoot bucketName rootPath)
                      , cfgBucketName = bucketName
                      , cfgReadFileThrottle = throttle
                      , cfgLogLevel = if debug then 2 else 0
+                     , cfgAppendInstanceId = appendInstanceId
                      }
 
     let range = Range fromDate toDate
@@ -346,14 +351,18 @@ instance Show UnsupportedContentType where
 
 processLines :: Config -> S3Path -> LineBuffer (Maybe Line) -> IO ()
 processLines cfg objectPath output = do
+  let !obj = B.singleton ',' `B.append` B.pack (T.unpack objectPath) `B.snoc` '\n'
+      !appendId = cfgAppendInstanceId cfg
   runRequest cfg $ do
     --liftIO $ debugMessage cfg ("OBJECT: " ++ show objectPath)
     t <- liftIO $ getCPUTime
     rsp <- Aws.pureAws (cfgAwsCfg cfg) (cfgS3Cfg cfg)
                        (cfgManager cfg) $!
              S3.getObject (cfgBucketName cfg) objectPath
-    let writeLine line =
-          liftIO (atomically (pushLine output (Just line)))
+    let writeLine line = do
+          let !line' | appendId  = B.init line `B.append` obj
+                     | otherwise = line
+          liftIO (atomically (pushLine output (Just line')))
     t' <- liftIO $ getCPUTime
     liftIO $ debugMessage cfg ("GOT_OBJECT: " ++ show objectPath ++ " "
            ++ show (fromIntegral (t' - t) / 1000000000.0 :: Double) ++ " ms")
