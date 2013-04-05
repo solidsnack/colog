@@ -121,15 +121,20 @@ instance ArgVal RangePattern where
 instance ArgVal (Maybe RangePattern) where converter = just
 
 patternArg :: Int -> Arg (Maybe RangePattern)
-patternArg n = pos n Nothing posInfo
-                 { posName = "STARTDATE[/ENDDATE]"
-                 , posDoc = "Start and optional end date of the logs to be " <>
-                            "requested.  A date can be any valid prefix of " <>
-                            "an ISO 8601 date.  The pattern \"...\" can be " <>
-                            "used to mean any date.  If the end date is " <>
-                            "missing then start date will be used in its " <>
-                            "place.\n\nExample: 2013-03-01T12:34"
-                 }
+patternArg n =
+  pos n Nothing posInfo
+    { posName = "STARTDATE[/{ENDDATE|+OFFSET}]"
+    , posDoc = "Start and optional end date of the logs to be " <>
+               "requested.  A date can be any valid prefix of " <>
+               "an ISO 8601 date, for example \"2013-03-01T12:34\" " <>
+               "or \"2013-03-01\".  The pattern \"...\" can be " <>
+               "used to mean any date.  If the end date is " <>
+               "missing then start date will be used in its " <>
+               "place. A date relative to the current time can be " <>
+               "specified via the syntax \"T-3d1h5m\" or \"t-4m\"." <>
+               "The end date may be specified relative to the start date. "<>
+               "For example: \"2013-03-01T14:20/+1h10m\""
+    }
 
 main :: IO ()
 main = run (term, defTI{ termName = colog
@@ -149,6 +154,14 @@ main = run (term, defTI{ termName = colog
          (colog ++ " s3://mybucket/logs/ 2013-03-23/...")
      , I "List all logs before and including January 11st, 2013:"
          (colog ++ " s3://mybucket/logs/ .../2013-01-11")
+     , I "List all logs from the first 10 days of January 2013:"
+         (colog ++ " s3://mybucket/logs/ 2013-01-01/+10d")
+     , I "List all logs from the last 15 minutes:"
+         (colog ++ " s3://mybucket/logs/ t-15m/...")
+     , I "List all logs from 30 minutes ago until 20 minutes ago:"
+         (colog ++ " s3://mybucket/logs/ t-30m/t-20m")
+     , I "List all logs from 30 minutes ago until 25 minutes ago:"
+         (colog ++ " s3://mybucket/logs/ t-30m/+5m")
      , I "List all logs:"
          (colog ++ " s3://mybucket/logs/ ...")
      ]
